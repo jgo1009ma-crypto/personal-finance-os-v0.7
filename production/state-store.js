@@ -1,5 +1,5 @@
 const {neon}=require('@neondatabase/serverless');
-const {cards:seedCards,debtPlans,recurring:seedRecurring,incomeRules,installmentCommitments,defaultPreferences}=require('../core/dist/src/seed');
+const {cards:seedCards,debtPlans,recurring:seedRecurring,incomeRules,installmentCommitments,defaultPreferences}=require('../server/dist/core/src/seed');
 const {cardSnapshots:seedSnapshots}=require('../server/dist/api/src/financial-snapshots');
 
 function clone(v){return structuredClone(v)}
