@@ -1,6 +1,6 @@
 const {neon}=require('@neondatabase/serverless');
 const {cards:seedCards,debtPlans,recurring:seedRecurring,incomeRules,installmentCommitments,defaultPreferences}=require('../core/dist/src/seed');
-const {cardSnapshots:seedSnapshots}=require('../api/dist/api/src/financial-snapshots');
+const {cardSnapshots:seedSnapshots}=require('../server/dist/api/src/financial-snapshots');
 
 function clone(v){return structuredClone(v)}
 function defaultData(){return {version:7,cards:clone(seedCards).map(c=>({...c,status:c.status||'active'})),snapshots:clone(seedSnapshots),transactions:[],recurringOverrides:[],imports:[],copilotSessions:[],preferences:clone(defaultPreferences)};}
