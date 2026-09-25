@@ -14,6 +14,12 @@ function sessionSummary(s){return {id:s.id,title:s.title,createdAt:s.createdAt,u
 module.exports=async function handler(req,res){
   try{
     const url=new URL(req.url,'https://pfos.local');
+const forwardedPath=url.searchParams.get('__path');
+
+if(forwardedPath){
+  url.pathname='/api/'+String(forwardedPath).replace(/^\/+/, '');
+  url.searchParams.delete('__path');
+}
     if(req.method==='GET'&&url.pathname==='/api/v1/health')return json(res,200,{ok:true,version:'0.7.0',storage:process.env.DATABASE_URL?'neon-postgres':'unconfigured',runtime:'vercel-node',statementExtraction:'pdfjs'});
     if(req.method==='GET'&&url.pathname==='/api/v1/auth/session')return json(res,200,{authenticated:isAuthenticated(req,process.env.SESSION_SECRET)});
     if(req.method==='POST'&&url.pathname==='/api/v1/auth/login'){
