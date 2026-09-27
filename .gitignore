@@ -1,0 +1,6 @@
+.env
+data/user-data.json
+api/dist/
+core/dist/
+*.log
+.DS_Store
