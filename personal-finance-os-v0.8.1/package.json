@@ -1,0 +1,24 @@
+{
+  "name": "personal-finance-os",
+  "private": true,
+  "version": "0.8.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run build:core && npm run build:server",
+    "build:core": "tsc -p core/tsconfig.json",
+    "build:server": "tsc -p server/tsconfig.json",
+    "start": "node server/server.js",
+    "test": "bash test-all.sh",
+    "test:local": "bash test-all.sh",
+    "import:local-state": "node scripts/import-local-state.mjs"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.0",
+    "pdfjs-dist": "^6.3.289"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
