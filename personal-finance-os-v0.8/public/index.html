@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#315efb" id="themeColorMeta" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Finance OS" />
+  <title>Personal Finance OS</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Navegación principal">
+      <div class="brand"><div class="brand-mark">PF</div><div><strong>Finance OS</strong><span>Personal wealth console</span></div></div>
+      <nav id="nav">
+        <button class="nav-item active" data-route="overview"><span class="nav-dot"></span>Overview</button>
+        <button class="nav-item" data-route="accounts"><span class="nav-dot"></span>Cuentas</button>
+        <button class="nav-item" data-route="goals"><span class="nav-dot"></span>Metas</button>
+        <button class="nav-item" data-route="cards"><span class="nav-dot"></span>Tarjetas</button>
+        <button class="nav-item" data-route="transactions"><span class="nav-dot"></span>Movimientos</button>
+        <button class="nav-item" data-route="debt"><span class="nav-dot"></span>Deuda</button>
+        <button class="nav-item" data-route="recurring"><span class="nav-dot"></span>Recurrentes</button>
+        <button class="nav-item" data-route="imports"><span class="nav-dot"></span>Estados / Conciliar</button>
+        <button class="nav-item" data-route="cashflow"><span class="nav-dot"></span>Cash flow</button>
+        <button class="nav-item" data-route="simulator"><span class="nav-dot"></span>Simulador</button>
+        <button class="nav-item" data-route="budgets"><span class="nav-dot"></span>Presupuestos</button>
+        <button class="nav-item" data-route="copilot"><span class="nav-dot"></span>Copiloto <span class="ai-badge">AI</span></button>
+        <button class="nav-item" data-route="reports"><span class="nav-dot"></span>Reportes <span class="soon">next</span></button>
+      </nav>
+      <div class="sidebar-foot"><span class="status-dot"></span><div><strong>Engine online</strong><span>v0.8 · cloud mode</span></div></div>
+    </aside>
+    <button class="sidebar-backdrop" id="sidebarBackdrop" aria-label="Cerrar navegación"></button>
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" aria-label="Abrir navegación">☰</button>
+        <div class="title-stack"><p class="eyebrow" id="pageEyebrow">PERSONAL FINANCE OS</p><h1 id="pageTitle">Overview</h1></div>
+        <div class="top-actions">
+          <div class="asof"><span>Datos al</span><strong id="asOfLabel">—</strong></div>
+          <button class="icon-btn" id="themeToggle" aria-label="Cambiar tema" title="Cambiar tema">◐</button>
+          <div class="popover-wrap">
+            <button class="icon-btn" id="alertsBtn" aria-label="Alertas" title="Alertas">!</button>
+            <span class="notification-badge" id="alertsBadge" hidden>0</span>
+            <div class="alerts-popover" id="alertsPopover" hidden></div>
+          </div>
+          <button class="primary" id="quickAdd">+ Movimiento</button>
+        </div>
+      </header>
+      <section id="view" class="view"><div class="loading">Cargando sistema financiero…</div></section>
+    </main>
+  </div>
+  <nav class="mobile-nav" id="mobileNav" aria-label="Navegación móvil">
+    <button class="mobile-tab active" data-mobile-route="overview"><span>⌂</span><small>Inicio</small></button>
+    <button class="mobile-tab" data-mobile-route="cashflow"><span>↗</span><small>Flujo</small></button>
+    <button class="mobile-tab" data-mobile-route="transactions"><span>＋</span><small>Movimientos</small></button>
+    <button class="mobile-tab" data-mobile-route="goals"><span>◎</span><small>Metas</small></button>
+    <button class="mobile-tab" data-mobile-route="more"><span>☰</span><small>Más</small></button>
+  </nav>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
