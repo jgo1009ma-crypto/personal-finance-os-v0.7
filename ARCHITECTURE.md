@@ -155,3 +155,33 @@ public/icons/*
 ```
 
 The service worker caches only same-origin static GET resources and intentionally ignores `/api/*`. Mobile/tablet navigation and dark mode remain client presentation concerns; financial state is persisted through the API.
+
+## v0.8.1 legacy-tracker boundary
+
+`Finanzas_Personales_v2.xlsx` is deliberately **not** treated as a second canonical ledger. It is a legacy planning source with month-level dates and a mixture of current-cycle charges, recurring costs, installments and projections.
+
+```text
+Legacy workbook snapshot
+       |
+       v
+legacy-tracker.ts (immutable source representation)
+       |
+       +--> Reports / analysis (read-only)
+       |
+       +--> known Liverpool commitments (derived, documented)
+       |
+       +--> candidate confirmation gate
+                    |
+              user supplies real date
+                    |
+                    v
+              canonical transaction
+              source=legacy_tracker
+              sourceImportId=<stable row id>
+```
+
+Rows already represented by recurring rules, known MSI commitments or debt plans remain reference-only to prevent double counting. Ambiguous interest, loan and transfer-like rows stay in review/reference status. New candidate transactions do not affect balances until explicitly confirmed. Current user-maintained values always take precedence over conflicting values from the older workbook.
+
+## Correcciones de confiabilidad
+
+La versión 0.8.1 está unificada en la raíz. Las importaciones y aportaciones a metas son operaciones de agregado atómicas. PostgreSQL persiste estado y auditoría en una sola sentencia condicionada a la revisión. El login usa un contador compartido `login_attempts`. El servidor local escucha solo en loopback y serializa peticiones sobre su agregado. Ver `docs/AUDIT_2026-09-27.md` para límites y siguientes prioridades.

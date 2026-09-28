@@ -6,8 +6,11 @@ exports.expectedPersonalPayDate = expectedPersonalPayDate;
 exports.splitMSI = splitMSI;
 exports.projectTransaction = projectTransaction;
 const date_1 = require("./date");
+const validation_1 = require("./validation");
 /** Resolve the statement closing date that will contain a transaction. */
 function statementCloseFor(txDate, card) {
+    (0, validation_1.validDate)(txDate);
+    (0, validation_1.integer)(card.statementCloseDay, 'statementCloseDay', 1, 31);
     const d = new Date(txDate + 'T00:00:00Z');
     const y = d.getUTCFullYear();
     const m = d.getUTCMonth() + 1;
@@ -47,8 +50,8 @@ function expectedPersonalPayDate(close, card) {
     return best ?? legal;
 }
 function splitMSI(total, months, firstDue) {
-    if (months <= 0)
-        throw new Error('months must be > 0');
+    (0, validation_1.finiteNumber)(total, 'total', 0.01);
+    (0, validation_1.integer)(months, 'months', 1, 360);
     const cents = Math.round(total * 100);
     const base = Math.floor(cents / months);
     const remainder = cents - base * months;

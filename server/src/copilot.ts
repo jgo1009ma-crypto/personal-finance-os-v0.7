@@ -84,7 +84,8 @@ export class CopilotService {
       as_of:{type:'string',description:'Fecha YYYY-MM-DD.'}
     },['as_of']),
     tool('list_accounts','Lista cuentas de activos registradas (banco, ahorro, efectivo, inversión).',{},[]),
-    tool('list_goals','Lista metas financieras y su progreso.',{},[])
+    tool('list_goals','Lista metas financieras y su progreso.',{},[]),
+    tool('get_legacy_tracker_analysis','Consulta el tracker financiero anterior ya reconciliado como fuente secundaria. Úsalo para gasto reciente del ciclo de octubre, proyección histórica octubre-enero, concentración por fuente y movimientos pendientes de confirmar.',{},[])
   ];}
 
   private async executeTool(name:string,args:any):Promise<any>{
@@ -115,6 +116,7 @@ export class CopilotService {
       case 'get_planning_summary': return this.finance.planningSummary(args.as_of||isoToday());
       case 'list_accounts': return this.finance.listAccounts();
       case 'list_goals': return this.finance.listGoals();
+      case 'get_legacy_tracker_analysis': return this.finance.legacyTrackerReport();
       default: throw new Error(`Unknown copilot tool: ${name}`);
     }
   }
@@ -134,6 +136,7 @@ export class CopilotService {
     if(name==='get_planning_summary')return `Patrimonio ${result.accountsConfigured?money(result.netWorth):'incompleto'}, activos ${money(result.totalAssets)}, ${result.alerts?.length||0} alertas`;
     if(name==='list_accounts')return `${result.length} cuentas de activos`;
     if(name==='list_goals')return `${result.length} metas financieras`;
+    if(name==='get_legacy_tracker_analysis')return `Tracker legado: ciclo ${money(result.currentCycleTotal)}, variable candidato ${money(result.candidateVariableSpend)}, caída a enero ${result.declineToJanuaryPct}%`;
     return name;
   }
 
@@ -148,6 +151,7 @@ REGLAS DE EXACTITUD:
 - Si compara pagar deuda vs conservar liquidez, usa simulaciones y describe ambos efectos: intereses y caja.
 - No trates pagos de tarjeta como gasto nuevo.
 - Liverpool corta el día 27 y se paga el día 27 del mes siguiente; no apliques el día 30 genérico.
+- El tracker legado es una fuente secundaria de planeación, no un estado oficial. Úsalo para contexto y tendencias; no presentes sus filas como transacciones confirmadas salvo que estén marcadas como importadas.
 
 SEGURIDAD Y CONTROL:
 - Este copiloto es de SOLO LECTURA. Nunca afirma haber creado, borrado, pagado o modificado nada. Para cambios, indica que deben hacerse en el módulo correspondiente de la app.
@@ -195,7 +199,9 @@ Fecha del sistema: ${isoToday()}.`}
   private async localChat(_history:CopilotHistoryMessage[],message:string):Promise<CopilotAnswer>{
     const q=message.toLowerCase();const trace:CopilotToolTrace[]=[];const call=async(name:string,args:any)=>{const t0=Date.now();const result=await this.executeTool(name,args);trace.push({name,arguments:args,durationMs:Date.now()-t0,summary:this.digest(name,result)});return result;};
     let content:string;
-    if(/patrimonio|activo|cuenta|ahorro|meta|fondo de emergencia/.test(q)){
+    if(/tracker|hist[oó]ric|gasto reciente|octubre|movimientos anteriores/.test(q)){
+      const r=await call('get_legacy_tracker_analysis',{});content=`El tracker anterior registra ${money(r.currentCycleTotal)} de obligaciones para octubre y ${money(r.candidateVariableSpend)} de gasto variable no identificado aún en el ledger vivo. La proyección del propio tracker baja a ${money(r.projectedJanuaryTotal)} en enero (${r.declineToJanuaryPct}% menos). Hay ${r.candidateCount} movimientos candidatos que requieren confirmación antes de afectar saldos.`;
+    }else if(/patrimonio|activo|cuenta|ahorro|meta|fondo de emergencia/.test(q)){
       const p=await call('get_planning_summary',{as_of:isoToday()});content=p.accountsConfigured?`Tus activos registrados suman ${money(p.totalAssets)} y tu patrimonio neto actual es ${money(p.netWorth)}. El fondo de emergencia tiene ${money(p.emergencyFund.currentAmount)} de ${money(p.emergencyFund.targetAmount)} y tienes ${p.goals.activeCount} metas activas.`:`Aún no hay cuentas de activos registradas, así que el patrimonio neto está incompleto. La deuda registrada es ${money(p.totalDebt)}. Agrega tus cuentas para completar el balance.`;
     }else if(/inter[eé]s|abono|pagar.*bbva|pagar.*nu|deuda cara/.test(q)){
       const plans=await call('list_debt_plans',{});const ordered=[...plans].sort((a:any,b:any)=>b.apr-a.apr);content=ordered.length?`Tus deudas con interés, ordenadas por tasa, son: ${ordered.map((p:any)=>`${p.name} ${(p.apr*100).toFixed(1)}% APR, principal ${money(p.principal)}`).join('; ')}. Para calcular un abono extraordinario exacto, escribe el monto que quieres aplicar.`:'No hay planes con interés registrados.';

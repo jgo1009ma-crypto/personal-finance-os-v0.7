@@ -2,7 +2,18 @@
 
 Private personal-finance operating system.
 
-Current version: **v0.8.0**
+Current version: **v0.8.1**
+
+
+## What v0.8.1 adds
+
+- **Legacy tracker integration:** `Finanzas_Personales_v2.xlsx` is represented as a secondary, traceable planning source instead of blindly replacing the live ledger.
+- **Reports module:** October 2026 obligations, source concentration, Oct→Jan runoff, current-cycle candidates and legacy-vs-live warnings are visible in the app.
+- **Safe candidate import:** only clearly identified unmodeled card purchases can be confirmed into the live ledger; the user supplies the real transaction date first.
+- **Duplicate protection:** confirmed legacy rows carry a stable `sourceImportId` and cannot be imported twice.
+- **Liverpool plan recovery:** the tracker fills the plan-level gap left by Liverpool's unreadable PDF encoding, with derived future commitments for Tablet, Xbox, Monitor and Playeras.
+- **Copilot context:** the read-only Copilot can query the legacy tracker analysis, but is explicitly instructed to treat it as secondary evidence.
+- **No Neon schema migration:** integration uses the existing aggregate state and transaction model.
 
 ## What v0.8 adds
 
@@ -133,3 +144,7 @@ Run:
 The suite compiles both TypeScript projects, runs billing/service/import/forecast/Copilot regressions, exercises the new v0.8 account/goal/planning APIs, performs local HTTP smoke tests, validates JavaScript/config files and verifies the production bundle entrypoints.
 
 See `docs/PHASE_8.md` for the v0.8 implementation and `docs/UPDATE_GITHUB_V08.md` for the safest upgrade procedure when the new ZIP is extracted into a different Windows folder.
+
+## Revisión de confiabilidad
+
+Consulta [la auditoría y sus límites](docs/AUDIT_2026-09-27.md). La versión activa está en la raíz del repositorio. Ejecuta `npm test` en Windows, macOS o Linux; los tests usan datos temporales aislados.

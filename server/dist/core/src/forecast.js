@@ -6,6 +6,7 @@ exports.projectIncomeRules = projectIncomeRules;
 exports.projectVariableBudget = projectVariableBudget;
 exports.buildForecast = buildForecast;
 const date_1 = require("./date");
+const validation_1 = require("./validation");
 const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const iso = (d) => d.toISOString().slice(0, 10);
 function cashflow(events, opening = 0) {
@@ -16,6 +17,8 @@ function cashflow(events, opening = 0) {
     });
 }
 function horizonEnd(asOf, months) {
+    (0, validation_1.validDate)(asOf);
+    (0, validation_1.integer)(months, 'months', 1, 36);
     const [y, m] = asOf.slice(0, 7).split('-').map(Number);
     const lastMonth = (0, date_1.makeDate)(y, m + Math.max(1, months) - 1, 1);
     return iso((0, date_1.endOrDay)(lastMonth.getUTCFullYear(), lastMonth.getUTCMonth() + 1, 31));
@@ -70,9 +73,10 @@ function projectVariableBudget(monthlyAmount, asOf, until) {
     let cursor = (0, date_1.makeDate)(sy, sm, 1);
     while ((0, date_1.ym)(cursor) <= until.slice(0, 7)) {
         const y = cursor.getUTCFullYear(), m = cursor.getUTCMonth() + 1;
-        const amount = r2(monthlyAmount / 4);
+        const cents = Math.round(monthlyAmount * 100), base = Math.floor(cents / 4);
         [7, 14, 21, 28].forEach((day, i) => {
             const date = iso((0, date_1.endOrDay)(y, m, day));
+            const amount = (base + (i === 3 ? cents - base * 4 : 0)) / 100;
             if (date >= asOf && date <= until)
                 out.push({ date, label: `Presupuesto variable ${i + 1}/4`, amount, type: 'expense', itemType: 'variable_budget', assumption: true });
         });
@@ -81,6 +85,15 @@ function projectVariableBudget(monthlyAmount, asOf, until) {
     return out;
 }
 function buildForecast(asOf, until, events, preferences, warnings = []) {
+    (0, validation_1.validDate)(asOf);
+    (0, validation_1.validDate)(until);
+    (0, validation_1.finiteNumber)(preferences.openingCash, 'openingCash', -Number.MAX_SAFE_INTEGER / 100);
+    if (until < asOf || Date.parse(until) - Date.parse(asOf) > 366 * 3 * 86400000)
+        throw new Error('invalid forecast range');
+    for (const event of events) {
+        (0, validation_1.validDate)(event.date);
+        (0, validation_1.finiteNumber)(event.amount, 'event amount');
+    }
     const filtered = events.filter(e => e.date >= asOf && e.date <= until && e.amount >= 0);
     const daily = cashflow(filtered, preferences.openingCash);
     const monthMap = new Map();
@@ -133,14 +146,21 @@ function buildForecast(asOf, until, events, preferences, warnings = []) {
         r.endingBalance = running;
     }
     let minimumCash = preferences.openingCash, minimumCashDate, negativeDays = 0, firstNegativeDate;
-    for (const r of daily) {
-        if (r.balance < minimumCash) {
-            minimumCash = r.balance;
-            minimumCashDate = r.date;
+    // Risk metrics use calendar days and closing balances, independent of labels/event order.
+    const closings = new Map();
+    for (const row of daily)
+        closings.set(row.date, row.balance);
+    let closing = preferences.openingCash;
+    for (let day = new Date(asOf + 'T00:00:00Z'); iso(day) <= until; day = (0, date_1.addDays)(day, 1)) {
+        const date = iso(day);
+        closing = closings.get(date) ?? closing;
+        if (closing < minimumCash) {
+            minimumCash = closing;
+            minimumCashDate = date;
         }
-        if (r.balance < 0) {
+        if (closing < 0) {
             negativeDays++;
-            firstNegativeDate ??= r.date;
+            firstNegativeDate ??= date;
         }
     }
     const metrics = { openingCash: r2(preferences.openingCash), endingCash: r2(daily.at(-1)?.balance ?? preferences.openingCash), minimumCash: r2(minimumCash), minimumCashDate, negativeDays, firstNegativeDate, monthsWithNegativeEndingBalance: monthly.filter(m => m.endingBalance < 0).length, totalIncome: r2(filtered.filter(e => e.type === 'income').reduce((s, e) => s + e.amount, 0)), totalOutflow: r2(filtered.filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0)) };

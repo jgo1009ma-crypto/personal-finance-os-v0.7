@@ -1,3 +1,4 @@
+const {commitDraft,applyImport,applyContribution}=require('../production/atomic-mutations');
 const http=require('http');
 const fs=require('fs');
 const path=require('path');
@@ -10,7 +11,7 @@ const {cardSnapshots:seedSnapshots}=require('./dist/server/src/financial-snapsho
 
 const ROOT=path.resolve(__dirname,'..');
 const WEB=path.join(ROOT,'public');
-const DATA_DIR=path.join(ROOT,'data');
+const DATA_DIR=process.env.PFOS_DATA_DIR?path.resolve(process.env.PFOS_DATA_DIR):path.join(ROOT,'data');
 const DATA_FILE=path.join(DATA_DIR,'user-data.json');
 function loadDotEnv(){const file=path.join(ROOT,'.env');if(!fs.existsSync(file))return;for(const raw of fs.readFileSync(file,'utf8').split(/\r?\n/)){const line=raw.trim();if(!line||line.startsWith('#'))continue;const i=line.indexOf('=');if(i<1)continue;const key=line.slice(0,i).trim(),value=line.slice(i+1).trim().replace(/^['"]|['"]$/g,'');if(process.env[key]===undefined)process.env[key]=value;}}
 loadDotEnv();
@@ -30,12 +31,14 @@ function loadData(){
       const snap=migrated.snapshots.find(x=>x.cardId==='liverpool');if(snap&&snap.statementDate==='2026-09-15')snap.statementDate='2026-08-27';
     }
     return migrated;
-  }catch(_){return defaultData();}
+  }catch(error){if(error.code==='ENOENT')return defaultData();throw new Error('Cannot read local financial state; original file preserved', {cause:error});}
 }
 function saveData(data){const tmp=DATA_FILE+'.tmp';fs.writeFileSync(tmp,JSON.stringify(data,null,2));fs.renameSync(tmp,DATA_FILE);}
 const data=loadData();saveData(data);
 
 const repo={
+  async commitStatementImport(statement,transactions,snapshot){await commitDraft(data,saveData,draft=>applyImport(draft,statement,transactions,snapshot));},
+  async contributeToGoal(contribution){await commitDraft(data,saveData,draft=>applyContribution(draft,contribution));},
   async listCards(includeArchived=false){return clone(data.cards.filter(c=>includeArchived||(c.status||'active')==='active'))},
   async getCard(id){return clone(data.cards.find(c=>c.id===id))},
   async saveCard(card){data.cards.push(clone(card));saveData(data)},
@@ -100,11 +103,16 @@ function extractText(buffer,contentType,filename){
 const MIME={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png'};
 function staticFile(req,res,urlPath){const rel=urlPath==='/'?'index.html':urlPath.replace(/^\//,'');const file=path.resolve(WEB,rel);if(!file.startsWith(WEB+path.sep)&&file!==path.join(WEB,'index.html'))return false;if(!fs.existsSync(file)||!fs.statSync(file).isFile())return false;const ext=path.extname(file);const content=fs.readFileSync(file);res.writeHead(200,{'content-type':MIME[ext]||'application/octet-stream','content-length':content.length,'cache-control':ext==='.html'?'no-store':'public, max-age=60'});res.end(content);return true;}
 
+let requestQueue=Promise.resolve();
 const server=http.createServer(async(req,res)=>{
+  // The local aggregate is shared; serialize requests so a multi-step operation cannot interleave.
+  let release;const previous=requestQueue;requestQueue=new Promise(resolve=>{release=resolve;});await previous;
   try{
+    const host=String(req.headers.host||'');
+    if(!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)||req.headers['sec-fetch-site']==='cross-site'||(req.headers.origin&&req.headers.origin!==`http://${host}`))return json(res,403,{error:{code:'FORBIDDEN',message:'Origin rejected'}});
     const url=new URL(req.url,'http://localhost');
     if(url.pathname.startsWith('/api/')){
-      if(req.method==='GET'&&url.pathname==='/api/v1/health')return json(res,200,{ok:true,version:'0.8.0',storage:'local-json',statementExtraction:'pdftotext-adapter'});
+      if(req.method==='GET'&&url.pathname==='/api/v1/health')return json(res,200,{ok:true,version:'0.8.1',storage:'local-json',statementExtraction:'pdftotext-adapter'});
       if(req.method==='GET'&&url.pathname==='/api/v1/bootstrap')return json(res,200,await service.bootstrap());
       if(req.method==='GET'&&url.pathname==='/api/v1/overview')return json(res,200,await service.overview(url.searchParams.get('asOf')||new Date().toISOString().slice(0,10)));
 
@@ -168,10 +176,12 @@ const server=http.createServer(async(req,res)=>{
         const history=session.messages.filter(m=>m.role==='user'||m.role==='assistant').slice(-12).map(m=>({role:m.role,content:m.content}));const now=new Date().toISOString();session.messages.push({id:randomUUID(),role:'user',content:message,createdAt:now});if(session.title==='Nueva conversación')session.title=message.replace(/\s+/g,' ').slice(0,52)+(message.length>52?'…':'');session.updatedAt=now;saveCopilotSession(session);
         const answer=await copilot.chat(history,message);const assistant={id:randomUUID(),role:'assistant',content:answer.content,createdAt:new Date().toISOString(),provider:answer.provider,model:answer.model,toolTrace:answer.toolTrace,warnings:answer.warnings};session.messages.push(assistant);session.updatedAt=assistant.createdAt;saveCopilotSession(session);return json(res,200,{session:sessionSummary(session),message:assistant,status:copilot.status()});}
 
+      if(req.method==='GET'&&url.pathname==='/api/v1/reports/legacy-tracker')return json(res,200,await service.legacyTrackerReport());
+      const legacyImport=url.pathname.match(/^\/api\/v1\/reports\/legacy-tracker\/items\/([^/]+)\/import$/);if(req.method==='POST'&&legacyImport){const b=await jsonBody(req);return json(res,201,await service.importLegacyTrackerItem(legacyImport[1],b.date));}
       if(req.method==='GET'&&url.pathname==='/api/v1/reports/payment-month-spend')return json(res,200,{month:url.searchParams.get('month'),amount:await service.paymentMonthSpend(url.searchParams.get('month'))});
       return json(res,404,{error:{code:'NOT_FOUND',message:'Route not found'}});
     }
     if(staticFile(req,res,url.pathname))return;return staticFile(req,res,'/');
-  }catch(e){return json(res,400,{error:{code:'BAD_REQUEST',message:e.message||String(e)}});}
+  }catch(e){return json(res,400,{error:{code:'BAD_REQUEST',message:e.message||String(e)}});}finally{release();}
 });
-const port=Number(process.env.PORT||8787);server.listen(port,()=>console.log(`Personal Finance OS v0.8 listening on http://localhost:${port}`));
+const port=Number(process.env.PORT||8787);server.listen(port,'127.0.0.1',()=>console.log(`Personal Finance OS v0.8.1 listening on http://localhost:${server.address().port}`));

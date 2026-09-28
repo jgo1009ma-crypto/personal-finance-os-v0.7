@@ -1,3 +1,4 @@
+const {commitDraft,applyImport,applyContribution}=require('./atomic-mutations');
 const {neon}=require('@neondatabase/serverless');
 const {cards:seedCards,debtPlans,recurring:seedRecurring,incomeRules,installmentCommitments,defaultPreferences}=require('../server/dist/core/src/seed');
 const {cardSnapshots:seedSnapshots}=require('../server/dist/server/src/financial-snapshots');
@@ -5,14 +6,27 @@ const {cardSnapshots:seedSnapshots}=require('../server/dist/server/src/financial
 function clone(v){return structuredClone(v)}
 const defaultUiPreferences=()=>({theme:'system',dashboardMode:'standard',dashboardWidgets:['netWorth','debt','cashflow','emergency','credit','alerts','goals']});
 function defaultData(){return {version:8,cards:clone(seedCards).map(c=>({...c,status:c.status||'active'})),snapshots:clone(seedSnapshots),transactions:[],recurringOverrides:[],imports:[],copilotSessions:[],accounts:[],goals:[],goalContributions:[],uiPreferences:defaultUiPreferences(),preferences:clone(defaultPreferences)};}
-function migrate(raw){const d=defaultData();const x={...d,...raw,cards:Array.isArray(raw?.cards)?raw.cards:d.cards,snapshots:Array.isArray(raw?.snapshots)?raw.snapshots:d.snapshots,transactions:Array.isArray(raw?.transactions)?raw.transactions:[],recurringOverrides:Array.isArray(raw?.recurringOverrides)?raw.recurringOverrides:[],imports:Array.isArray(raw?.imports)?raw.imports:[],copilotSessions:Array.isArray(raw?.copilotSessions)?raw.copilotSessions:[],accounts:Array.isArray(raw?.accounts)?raw.accounts:[],goals:Array.isArray(raw?.goals)?raw.goals:[],goalContributions:Array.isArray(raw?.goalContributions)?raw.goalContributions:[],uiPreferences:{...d.uiPreferences,...(raw?.uiPreferences||{})},preferences:{...d.preferences,...(raw?.preferences||{})},version:8};const liv=x.cards.find(c=>c.id==='liverpool');if(liv){liv.dueRule={type:'fixed_day',day:27};delete liv.personalPayDay;}return x;}
+function migrate(raw){const d=defaultData();const x={...d,...raw,cards:Array.isArray(raw?.cards)?raw.cards:d.cards,snapshots:Array.isArray(raw?.snapshots)?raw.snapshots:d.snapshots,transactions:Array.isArray(raw?.transactions)?raw.transactions:[],recurringOverrides:Array.isArray(raw?.recurringOverrides)?raw.recurringOverrides:[],imports:Array.isArray(raw?.imports)?raw.imports:[],copilotSessions:Array.isArray(raw?.copilotSessions)?raw.copilotSessions:[],accounts:Array.isArray(raw?.accounts)?raw.accounts:[],goals:Array.isArray(raw?.goals)?raw.goals:[],goalContributions:Array.isArray(raw?.goalContributions)?raw.goalContributions:[],uiPreferences:{...d.uiPreferences,...(raw?.uiPreferences||{})},preferences:{...d.preferences,...(raw?.preferences||{})},version:8};const liv=x.cards.find(c=>c.id==='liverpool');if(liv&&Number(raw?.version||0)<5){liv.dueRule={type:'fixed_day',day:27};delete liv.personalPayDay;}return x;}
 
 class NeonStateStore{
   constructor(url,stateId='primary'){if(!url)throw new Error('DATABASE_URL is required in production');this.sql=neon(url);this.stateId=stateId;this.revision=0;this.data=null;}
   async ensureSchema(){await this.sql`create table if not exists app_state (id text primary key,state jsonb not null,revision bigint not null default 1,created_at timestamptz not null default now(),updated_at timestamptz not null default now())`;await this.sql`create table if not exists audit_events (id bigserial primary key,state_id text not null references app_state(id) on delete cascade,event_type text not null,revision bigint not null,metadata jsonb not null default '{}'::jsonb,created_at timestamptz not null default now())`;await this.sql`create table if not exists state_backups (id bigserial primary key,state_id text not null references app_state(id) on delete cascade,revision bigint not null,state jsonb not null,reason text,created_at timestamptz not null default now())`;}
   async load(){await this.ensureSchema();let rows=await this.sql`select state,revision from app_state where id=${this.stateId}`;if(!rows.length){const initial=defaultData();rows=await this.sql`insert into app_state(id,state,revision) values(${this.stateId},${JSON.stringify(initial)}::jsonb,1) on conflict(id) do update set id=excluded.id returning state,revision`;}
     this.data=migrate(rows[0].state);this.revision=Number(rows[0].revision);return this.data;}
-  async persist(eventType='update',metadata={}){if(!this.data)throw new Error('State not loaded');const expected=this.revision;const next=expected+1;const rows=await this.sql`update app_state set state=${JSON.stringify(this.data)}::jsonb,revision=${next},updated_at=now() where id=${this.stateId} and revision=${expected} returning revision`;if(!rows.length)throw new Error('Concurrent update detected. Refresh and retry.');this.revision=Number(rows[0].revision);await this.sql`insert into audit_events(state_id,event_type,revision,metadata) values(${this.stateId},${eventType},${this.revision},${JSON.stringify(metadata)}::jsonb)`;return this.revision;}
+  async persist(eventType='update',metadata={},draft=this.data){
+    if(!draft)throw new Error('State not loaded');
+    // State and audit must succeed together; a revision conflict writes neither.
+    const rows=await this.sql`with updated as (
+      update app_state set state=${JSON.stringify(draft)}::jsonb,revision=revision+1,updated_at=now()
+      where id=${this.stateId} and revision=${this.revision} returning id,revision
+    ), audited as (
+      insert into audit_events(state_id,event_type,revision,metadata)
+      select id,${eventType},revision,${JSON.stringify(metadata)}::jsonb from updated returning revision
+    ) select revision from audited`;
+    if(!rows.length)throw new Error('Concurrent update detected. Refresh and retry.');
+    this.revision=Number(rows[0].revision);return this.revision;
+  }
+
   async backup(reason='manual'){if(!this.data)await this.load();await this.sql`insert into state_backups(state_id,revision,state,reason) values(${this.stateId},${this.revision},${JSON.stringify(this.data)}::jsonb,${reason})`;return {revision:this.revision,reason};}
   async recentAudit(limit=50){return this.sql.query('select event_type,revision,metadata,created_at from audit_events where state_id=$1 order by created_at desc limit $2',[this.stateId,limit]);}
 }
@@ -20,6 +34,12 @@ class NeonStateStore{
 function makeRepository(store,data){
   const save=(type,meta)=>store.persist(type,meta);
   return {
+    async commitStatementImport(statement,transactions,snapshot){
+      await commitDraft(data,draft=>store.persist('import.committed',{importId:statement.id},draft),draft=>applyImport(draft,statement,transactions,snapshot));
+    },
+    async contributeToGoal(contribution){
+      await commitDraft(data,draft=>store.persist('goal.contribution',{goalId:contribution.goalId,contributionId:contribution.id},draft),draft=>applyContribution(draft,contribution));
+    },
     async listCards(includeArchived=false){return clone(data.cards.filter(c=>includeArchived||(c.status||'active')==='active'))},
     async getCard(id){return clone(data.cards.find(c=>c.id===id))},
     async saveCard(card){data.cards.push(clone(card));await save('card.created',{cardId:card.id})},

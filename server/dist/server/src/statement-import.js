@@ -4,6 +4,7 @@ exports.parseStatementSummary = parseStatementSummary;
 exports.parseMovementLines = parseMovementLines;
 exports.reconcileRows = reconcileRows;
 exports.buildStatementImport = buildStatementImport;
+const validation_1 = require("../../core/src/validation");
 const MONTHS = {
     ene: '01', feb: '02', mar: '03', abr: '04', may: '05', jun: '06', jul: '07', ago: '08', sep: '09', oct: '10', nov: '11', dic: '12',
     jan: '01', apr: '04', aug: '08', dec: '12'
@@ -31,16 +32,26 @@ function firstDate(text, patterns) {
         const m = text.match(p);
         if (m) {
             const d = dateTokenToIso(m[1]);
-            if (d)
-                return d;
+            if (d) {
+                try {
+                    (0, validation_1.validDate)(d);
+                    return d;
+                }
+                catch {
+                    continue;
+                }
+            }
         }
     }
 }
 function firstMoney(text, patterns) {
     for (const p of patterns) {
         const m = text.match(p);
-        if (m)
-            return money(m[1]);
+        if (m) {
+            const value = money(m[1]);
+            if (Number.isFinite(value) && value <= Number.MAX_SAFE_INTEGER / 100)
+                return value;
+        }
     }
 }
 function parseStatementSummary(text) {
@@ -77,8 +88,9 @@ function kindAndFinancing(description, sign) {
     if (/efectivo inmediato|disposicion/.test(n))
         return { kind: 'cash_advance', financing: 'interest_plan' };
     const m = n.match(/(?:^|\s)(\d{1,2})\s+de\s+(\d{1,2})(?:\s|$)/) || n.match(/(?:^|\s)(\d{1,2})\/(\d{1,2})(?:\s|$)/);
+    // A statement's installment charge is a single due amount, not the original MSI principal.
     if (m)
-        return { kind: 'purchase', financing: 'msi' };
+        return { kind: 'purchase', financing: 'regular' };
     return { kind: 'purchase', financing: 'regular' };
 }
 function fingerprint(cardId, date, description, amount, sign) {
@@ -109,10 +121,15 @@ function parseMovementLines(cardId, text, importId) {
         const amount = money(m[5]);
         if (!(amount > 0))
             continue;
-        const fp = fingerprint(cardId, transactionDate, description, amount, sign);
-        if (seen.has(fp))
+        try {
+            (0, validation_1.validDate)(transactionDate);
+            if (postingDate)
+                (0, validation_1.validDate)(postingDate);
+        }
+        catch {
             continue;
-        seen.add(fp);
+        }
+        const fp = fingerprint(cardId, transactionDate, description, amount, sign);
         const guessed = kindAndFinancing(description, sign);
         rows.push({ id: crypto.randomUUID(), importId, transactionDate, postingDate, description, amount, sign, kindGuess: guessed.kind, financingGuess: guessed.financing, installments: guessed.installments, fingerprint: fp, status: 'new', sourceLine: line.trim() });
     }
@@ -148,7 +165,9 @@ function reconcileRows(rows, existing) {
             score += Math.min(.20, descScore(tx.description, row.description) * .20);
             const txSign = (tx.kind === 'payment' || tx.kind === 'refund') ? -1 : 1;
             if (txSign !== row.sign)
-                score -= .20;
+                continue;
+            if ((tx.kind === 'payment') !== (row.kindGuess === 'payment'))
+                continue;
             if (score > bestScore) {
                 bestScore = score;
                 best = tx;
@@ -174,11 +193,13 @@ function buildStatementImport(cardId, filename, text, existing) {
     const summary = parseStatementSummary(text);
     const rows = reconcileRows(parseMovementLines(cardId, text, id), existing.filter(t => t.cardId === cardId));
     const warnings = [];
+    if (new Set(rows.map(r => r.fingerprint)).size < rows.length)
+        warnings.push('Hay movimientos idénticos; revisa si son cargos distintos o líneas repetidas antes de confirmar.');
     if (!summary.statementDate)
         warnings.push('No se pudo detectar la fecha de corte automáticamente.');
     if (!rows.length)
         warnings.push('No se detectaron movimientos tabulares. El PDF puede requerir OCR o un parser específico.');
     if (summary.dataQuality === 'inconsistent')
         warnings.push('Los subtotales del estado no reconcilian con el saldo total publicado.');
-    return { id, cardId, filename, parser: 'mx-statement-v0.4', status: 'review', createdAt: new Date().toISOString(), summary, rows, extractionWarnings: warnings };
+    return { id, cardId, filename, parser: 'mx-statement-v0.4', status: 'review', createdAt: new Date().toISOString(), reviewedTransactionIds: existing.map(t => t.id), summary, rows, extractionWarnings: warnings };
 }

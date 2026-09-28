@@ -66,7 +66,7 @@ Expected:
 ```json
 {
   "ok": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "storage": "neon-postgres"
 }
 ```

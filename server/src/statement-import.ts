@@ -1,4 +1,5 @@
 import {FinancingKind,TransactionKind} from '../../core/src/types';
+import {validDate} from '../../core/src/validation';
 import {ImportedStatementRow,StatementImport,StatementSummary,TransactionRecord} from './contracts';
 
 const MONTHS:Record<string,string>={
@@ -19,11 +20,11 @@ function dateTokenToIso(token:string):string|undefined{
 
 function firstDate(text:string,patterns:RegExp[]){
   for(const p of patterns){
-    const m=text.match(p); if(m){const d=dateTokenToIso(m[1]);if(d)return d;}
+    const m=text.match(p); if(m){const d=dateTokenToIso(m[1]);if(d){try{validDate(d);return d;}catch{continue;}}}
   }
 }
 function firstMoney(text:string,patterns:RegExp[]){
-  for(const p of patterns){const m=text.match(p);if(m)return money(m[1]);}
+  for(const p of patterns){const m=text.match(p);if(m){const value=money(m[1]);if(Number.isFinite(value)&&value<=Number.MAX_SAFE_INTEGER/100)return value;}}
 }
 
 export function parseStatementSummary(text:string):StatementSummary{
@@ -56,7 +57,8 @@ function kindAndFinancing(description:string,sign:1|-1):{kind:TransactionKind,fi
   if(/comision|iva comision/.test(n)) return {kind:'fee',financing:'regular'};
   if(/efectivo inmediato|disposicion/.test(n)) return {kind:'cash_advance',financing:'interest_plan'};
   const m=n.match(/(?:^|\s)(\d{1,2})\s+de\s+(\d{1,2})(?:\s|$)/)||n.match(/(?:^|\s)(\d{1,2})\/(\d{1,2})(?:\s|$)/);
-  if(m) return {kind:'purchase',financing:'msi'};
+  // A statement's installment charge is a single due amount, not the original MSI principal.
+  if(m) return {kind:'purchase',financing:'regular'};
   return {kind:'purchase',financing:'regular'};
 }
 
@@ -78,7 +80,8 @@ export function parseMovementLines(cardId:string,text:string,importId:string):Im
     const description=m[3].replace(/\s{2,}/g,' ').trim();
     const sign=m[4]==='-'?-1:1 as 1|-1;
     const amount=money(m[5]); if(!(amount>0))continue;
-    const fp=fingerprint(cardId,transactionDate,description,amount,sign); if(seen.has(fp))continue; seen.add(fp);
+    try{validDate(transactionDate);if(postingDate)validDate(postingDate);}catch{continue;}
+    const fp=fingerprint(cardId,transactionDate,description,amount,sign);
     const guessed=kindAndFinancing(description,sign);
     rows.push({id:crypto.randomUUID(),importId,transactionDate,postingDate,description,amount,sign,kindGuess:guessed.kind,financingGuess:guessed.financing,installments:guessed.installments,fingerprint:fp,status:'new',sourceLine:line.trim()});
   }
@@ -105,7 +108,8 @@ export function reconcileRows(rows:ImportedStatementRow[],existing:TransactionRe
       score+=dd===0?.25:dd===1?.22:dd<=3?.15:.08;
       score+=Math.min(.20,descScore(tx.description,row.description)*.20);
       const txSign=(tx.kind==='payment'||tx.kind==='refund')?-1:1;
-      if(txSign!==row.sign)score-=.20;
+      if(txSign!==row.sign)continue;
+      if((tx.kind==='payment')!==(row.kindGuess==='payment'))continue;
       if(score>bestScore){bestScore=score;best=tx;}
     }
     row.matchConfidence=Math.round(bestScore*100)/100;
@@ -121,8 +125,9 @@ export function buildStatementImport(cardId:string,filename:string,text:string,e
   const summary=parseStatementSummary(text);
   const rows=reconcileRows(parseMovementLines(cardId,text,id),existing.filter(t=>t.cardId===cardId));
   const warnings:string[]=[];
+  if(new Set(rows.map(r=>r.fingerprint)).size<rows.length)warnings.push('Hay movimientos idénticos; revisa si son cargos distintos o líneas repetidas antes de confirmar.');
   if(!summary.statementDate)warnings.push('No se pudo detectar la fecha de corte automáticamente.');
   if(!rows.length)warnings.push('No se detectaron movimientos tabulares. El PDF puede requerir OCR o un parser específico.');
   if(summary.dataQuality==='inconsistent')warnings.push('Los subtotales del estado no reconcilian con el saldo total publicado.');
-  return {id,cardId,filename,parser:'mx-statement-v0.4',status:'review',createdAt:new Date().toISOString(),summary,rows,extractionWarnings:warnings};
+  return {id,cardId,filename,parser:'mx-statement-v0.4',status:'review',createdAt:new Date().toISOString(),reviewedTransactionIds:existing.map(t=>t.id),summary,rows,extractionWarnings:warnings};
 }

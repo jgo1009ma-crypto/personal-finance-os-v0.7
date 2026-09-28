@@ -20,3 +20,4 @@ __exportStar(require("./debt"), exports);
 __exportStar(require("./recurring"), exports);
 __exportStar(require("./forecast"), exports);
 __exportStar(require("./seed"), exports);
+__exportStar(require("./legacy-tracker"), exports);

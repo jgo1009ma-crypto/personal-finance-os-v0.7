@@ -1,7 +1,7 @@
 {
   "name": "@personal-finance-os/api",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node dist/api/test/service.spec.js && node dist/api/test/import.spec.js && node dist/api/test/forecast.spec.js && node dist/api/test/copilot.spec.js",

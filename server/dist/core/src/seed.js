@@ -59,7 +59,12 @@ exports.installmentCommitments = [
     { id: 'bbva-mp-aug', cardId: 'bbva-blue', name: 'Mercado Pago 22,431', monthlyAmount: 1870, remainingPayments: 11, nextPaymentDate: '2026-10-30', source: 'statement', dataQuality: 'official' },
     { id: 'nu-amazon', cardId: 'nu', name: 'Amazon 6 MSI', monthlyAmount: 471.67, remainingPayments: 4, nextPaymentDate: '2026-10-09', source: 'statement', dataQuality: 'official' },
     { id: 'nu-mercadolibre', cardId: 'nu', name: 'MercadoLibre 3 MSI', monthlyAmount: 83.22, remainingPayments: 1, nextPaymentDate: '2026-10-09', source: 'statement', dataQuality: 'official' },
-    { id: 'nu-mercadopago', cardId: 'nu', name: 'Mercado Pago 6 MSI', monthlyAmount: 540.34, remainingPayments: 5, nextPaymentDate: '2026-10-09', source: 'statement', dataQuality: 'official' }
+    { id: 'nu-mercadopago', cardId: 'nu', name: 'Mercado Pago 6 MSI', monthlyAmount: 540.34, remainingPayments: 5, nextPaymentDate: '2026-10-09', source: 'statement', dataQuality: 'official' },
+    // Liverpool plan-level detail recovered from the pre-app tracker. The PDF itself did not expose reliable plan text.
+    { id: 'liverpool-tablet-legacy', cardId: 'liverpool', name: 'Tablet (tracker legado)', monthlyAmount: 1083.17, remainingPayments: 5, nextPaymentDate: '2026-10-27', source: 'manual', dataQuality: 'derived' },
+    { id: 'liverpool-xbox-legacy', cardId: 'liverpool', name: 'Xbox (tracker legado)', monthlyAmount: 1744.33, remainingPayments: 5, nextPaymentDate: '2026-10-27', source: 'manual', dataQuality: 'derived' },
+    { id: 'liverpool-monitor-legacy', cardId: 'liverpool', name: 'Monitor Edith (tracker legado)', monthlyAmount: 588.67, remainingPayments: 3, nextPaymentDate: '2026-10-27', source: 'manual', dataQuality: 'derived' },
+    { id: 'liverpool-playeras-legacy', cardId: 'liverpool', name: 'Playeras (tracker legado)', monthlyAmount: 230, remainingPayments: 3, nextPaymentDate: '2026-10-27', source: 'manual', dataQuality: 'estimated' }
 ];
 exports.defaultPreferences = {
     openingCash: 0,
