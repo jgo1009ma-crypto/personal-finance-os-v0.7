@@ -5,6 +5,22 @@ import {cardSnapshots as seedSnapshots,CardSnapshot} from './financial-snapshots
 import {Card,FinancialAccount,FinancialPreferences,GoalContribution,RecurringOverride,SavingsGoal,UiPreferences} from '../../core/src/types';
 
 export class InMemoryFinanceRepository implements FinanceRepository {
+  async commitStatementImport(statement:StatementImport,transactions:TransactionRecord[],snapshot?:CardSnapshot){
+    const index=this.imports.findIndex(i=>i.id===statement.id);
+    if(index<0||this.imports[index].status!=='review')throw new Error('Import is already committed');
+    this.transactions.push(...structuredClone(transactions));
+    if(snapshot){const i=this.snapshots.findIndex(s=>s.cardId===snapshot.cardId);if(i<0)this.snapshots.push(structuredClone(snapshot));else this.snapshots[i]=structuredClone(snapshot);}
+    this.imports[index]=structuredClone(statement);
+  }
+  async contributeToGoal(contribution:GoalContribution){
+    const goal=this.goals.find(g=>g.id===contribution.goalId);
+    if(!goal||goal.status==='archived')throw new Error('Goal unavailable');
+    const amount=Math.round((goal.currentAmount+contribution.amount)*100)/100;
+    if(!Number.isSafeInteger(Math.round(amount*100)))throw new Error('Goal balance is too large');
+    goal.currentAmount=amount;goal.updatedAt=contribution.createdAt;
+    goal.status=amount>=goal.targetAmount?'completed':'active';
+    this.goalContributions.push(structuredClone(contribution));
+  }
   private cards:Card[]=structuredClone(seedCards).map(c=>({...c,status:c.status||'active'}));
   private snapshots:CardSnapshot[]=structuredClone(seedSnapshots);
   private recurring=structuredClone(seedRecurring);

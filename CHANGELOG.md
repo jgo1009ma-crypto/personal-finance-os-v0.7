@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.1 — Legacy Tracker Integration
+
+- Integrated `Finanzas_Personales_v2.xlsx` as a secondary historical/planning source without overwriting the live financial model.
+- Added the Reports module with Oct 2026 tracker totals, Oct→Jan obligation runoff, payment-source concentration and budget comparison.
+- Added 22 reviewable import candidates from the October cycle, of which 21 regular purchases total MXN 9,093.50 and one is a MXN 25,454 iPhone purchase at 13 MSI.
+- Added explicit confirmation + real-date capture before a legacy candidate can affect balances.
+- Added stable `legacy_tracker` source IDs and duplicate-import protection.
+- Recovered Liverpool future installment detail from the tracker: Tablet, Xbox, Monitor Edith and Playeras.
+- Preserved current app values when the old tracker conflicts with newer user-maintained figures such as rent or maintenance.
+- Added the legacy tracker to the read-only Copilot toolset with source-quality guardrails.
+- Added regression tests for report totals, candidate imports, duplicate prevention and Liverpool commitments.
+- Bumped the PWA static cache to v0.8.1.
+
 ## v0.8.0 — Product Polish + Planning
 
 - Added asset accounts and deterministic net-worth calculation.

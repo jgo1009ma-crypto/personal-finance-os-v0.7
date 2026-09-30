@@ -3,6 +3,8 @@ import {StatementImport,TransactionRecord} from './contracts';
 import {CardSnapshot} from './financial-snapshots';
 
 export interface FinanceRepository {
+  commitStatementImport(statement:StatementImport,transactions:TransactionRecord[],snapshot?:CardSnapshot):Promise<void>;
+  contributeToGoal(contribution:GoalContribution):Promise<void>;
   listCards(includeArchived?:boolean): Promise<Card[]>;
   getCard(id:string): Promise<Card|undefined>;
   saveCard(card:Card):Promise<void>;

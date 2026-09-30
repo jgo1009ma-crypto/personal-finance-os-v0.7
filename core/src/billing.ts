@@ -1,8 +1,10 @@
 import {Card,Transaction,Installment} from './types';
 import {endOrDay, addDays, ym, monthAdd} from './date';
+import {finiteNumber,integer,validDate} from './validation';
 
 /** Resolve the statement closing date that will contain a transaction. */
 export function statementCloseFor(txDate:string, card:Card){
+  validDate(txDate);integer(card.statementCloseDay,'statementCloseDay',1,31);
   const d=new Date(txDate+'T00:00:00Z');
   const y=d.getUTCFullYear();
   const m=d.getUTCMonth()+1;
@@ -42,7 +44,7 @@ export function expectedPersonalPayDate(close:Date, card:Card){
 }
 
 export function splitMSI(total:number, months:number, firstDue:Date):Installment[]{
-  if(months<=0) throw new Error('months must be > 0');
+  finiteNumber(total,'total',0.01);integer(months,'months',1,360);
   const cents=Math.round(total*100);
   const base=Math.floor(cents/months);
   const remainder=cents-base*months;

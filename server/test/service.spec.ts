@@ -24,7 +24,7 @@ async function run(){
 
   let overview=await service.overview('2026-10-13');
   eq(overview.totalDebt,137133.51,'live debt adds captured purchases');
-  let detail=await service.cardDashboard('banamex-classic');
+  let detail=await service.cardDashboard('banamex-classic','2026-10-13');
   eq(detail.currentBalance,21363.57,'live card balance');
 
   await service.createTransaction({

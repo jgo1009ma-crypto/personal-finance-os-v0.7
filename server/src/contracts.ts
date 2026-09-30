@@ -11,7 +11,7 @@ export interface CreateTransactionInput {
   category?: string;
   installments?: number;
   apr?: number;
-  source?: 'manual'|'statement_import';
+  source?: 'manual'|'statement_import'|'legacy_tracker';
   sourceImportId?: string;
 }
 
@@ -29,6 +29,26 @@ export interface PurchaseProjection {
   paymentMonth: string;
   amount?: number;
   installments?: Array<{number:number;dueMonth:string;amount:number}>;
+}
+
+
+export interface LegacyTrackerReport {
+  meta:{source:string;importedPeriod:string;coverage:readonly string[];dateQuality:string;notes:readonly string[]};
+  monthlyTotals:Record<string,number>;
+  sourceTotals:Record<string,Record<string,number>>;
+  currentCycleTotal:number;
+  projectedJanuaryTotal:number;
+  declineToJanuaryPct:number;
+  candidateVariableSpend:number;
+  candidateCount:number;
+  newInstallmentPrincipal:number;
+  knownOctoberInflows:number;
+  octoberResidualAfterKnownInflows:number;
+  variableSpendTarget:number;
+  variableOverTarget:number;
+  variableOverTargetPct:number;
+  bbvaSharePct:number;
+  items:Array<Record<string,unknown>>;
 }
 
 export interface Overview {
@@ -127,6 +147,7 @@ export interface StatementSummary {
 }
 
 export interface StatementImport {
+  reviewedTransactionIds?:string[];
   id:string;
   cardId:string;
   filename:string;

@@ -1,8 +1,11 @@
-import {amortize, buildForecast, compareExtraPayment, horizonEnd, monthlyEquivalent, projectIncomeRules, projectRecurring, projectTransaction, projectVariableBudget, recurringAmountForMonth, statementCloseFor} from '../../core/src';
+import {amortize, buildForecast, compareExtraPayment, horizonEnd, legacyTrackerItems, legacyTrackerMeta, legacyTrackerMonthlyTotals, legacyTrackerSourceTotals, monthlyEquivalent, projectIncomeRules, projectRecurring, projectTransaction, projectVariableBudget, recurringAmountForMonth, statementCloseFor} from '../../core/src';
 import {Card,FinancialAccount,FinancialPreferences,GoalContribution,RecurringOverride,SavingsGoal,UiPreferences} from '../../core/src/types';
-import {AppBootstrap, CardDashboard, CreateAccountInput, CreateCardInput, CreateGoalInput, CreateTransactionInput, DebtTimelineRow, ExtraPaymentSimulation, ForecastEnvelope, ForecastOptions, GoalProgress, Overview, PlanningAlert, PlanningSummary, PurchaseProjection, RecurringMonthRow, ScenarioComparison, ScenarioRequest, StatementImport, TransactionRecord} from './contracts';
+import {AppBootstrap, CardDashboard, CreateAccountInput, CreateCardInput, CreateGoalInput, CreateTransactionInput, DebtTimelineRow, ExtraPaymentSimulation, ForecastEnvelope, ForecastOptions, GoalProgress, LegacyTrackerReport, Overview, PlanningAlert, PlanningSummary, PurchaseProjection, RecurringMonthRow, ScenarioComparison, ScenarioRequest, StatementImport, TransactionRecord} from './contracts';
 import {FinanceRepository} from './repositories';
-import {buildStatementImport} from './statement-import';
+import {buildStatementImport,reconcileRows} from './statement-import';
+import {CardSnapshot} from './financial-snapshots';
+import {finiteNumber,validDate,validMonth} from '../../core/src/validation';
+import {validateTransaction,validateCard,validatePreferences} from './validation';
 import {endOrDay,makeDate,monthAdd,ym} from '../../core/src/date';
 
 function round2(n:number){ return Math.round((n+Number.EPSILON)*100)/100; }
@@ -17,10 +20,13 @@ export class FinanceService {
   constructor(private readonly repo:FinanceRepository){}
 
   async createTransaction(input:CreateTransactionInput):Promise<{transaction:TransactionRecord;projection:PurchaseProjection}> {
-    if(!input.cardId) throw new Error('cardId is required');
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error('date must be YYYY-MM-DD');
-    if(!(input.amount>0)) throw new Error('amount must be > 0');
-    if(input.financing==='msi' && input.installments!==undefined && input.installments<2) throw new Error('MSI requires installments >= 2');
+    const result=await this.prepareTransaction(input);
+    await this.repo.saveTransaction(result.transaction);
+    return result;
+  }
+
+  private async prepareTransaction(input:CreateTransactionInput):Promise<{transaction:TransactionRecord;projection:PurchaseProjection}> {
+    validateTransaction(input);
 
     const card=await this.repo.getCard(input.cardId);
     if(!card) throw new Error(`Unknown card: ${input.cardId}`);
@@ -33,12 +39,12 @@ export class FinanceService {
       source:input.source??'manual',sourceImportId:input.sourceImportId,
       createdAt:new Date().toISOString()
     };
-    await this.repo.saveTransaction(tx);
     const projection=projectTransaction(tx,card) as PurchaseProjection;
     return {transaction:tx,projection};
   }
 
   async projectPurchase(input:CreateTransactionInput):Promise<PurchaseProjection>{
+    validateTransaction({...input,description:input.description||"Proyección"});
     const card=await this.repo.getCard(input.cardId);
     if(!card) throw new Error(`Unknown card: ${input.cardId}`);
     return projectTransaction({
@@ -49,6 +55,7 @@ export class FinanceService {
   }
 
   async createCard(input:CreateCardInput):Promise<Card>{
+    validateCard(input);
     if(!input.name?.trim()||!input.issuer?.trim()) throw new Error('name and issuer are required');
     if(!(input.creditLimit>0)) throw new Error('creditLimit must be > 0');
     if(input.statementCloseDay<1||input.statementCloseDay>31) throw new Error('statementCloseDay must be 1..31');
@@ -60,6 +67,8 @@ export class FinanceService {
   async updateCard(id:string,patch:Partial<CreateCardInput>&{status?:'active'|'archived'}):Promise<Card>{
     const card=await this.repo.getCard(id);if(!card)throw new Error(`Unknown card: ${id}`);
     const updated:Card={...card,...patch,id};
+    validateCard(updated);
+    if(!["active","archived"].includes(updated.status||"active"))throw new Error("invalid card status");
     if(updated.statementCloseDay<1||updated.statementCloseDay>31)throw new Error('statementCloseDay must be 1..31');
     if(!(updated.creditLimit>0))throw new Error('creditLimit must be > 0');
     if(patch.status==='archived'&&!card.archivedAt)updated.archivedAt=new Date().toISOString();
@@ -70,7 +79,7 @@ export class FinanceService {
   async restoreCard(id:string){return this.updateCard(id,{status:'active'});}
 
   async simulateExtraPayment(planId:string, extraPayment:number):Promise<ExtraPaymentSimulation>{
-    if(!(extraPayment>0)) throw new Error('extraPayment must be > 0');
+    finiteNumber(extraPayment,'extraPayment',0.01);
     const plan=await this.repo.getDebtPlan(planId);
     if(!plan) throw new Error(`Unknown plan: ${planId}`);
     const result=compareExtraPayment(plan,extraPayment);
@@ -82,24 +91,80 @@ export class FinanceService {
     };
   }
 
-  async overview(asOf:string, monthlyIncome=34000):Promise<Overview>{
+  async overview(asOf:string, monthlyIncome?:number):Promise<Overview>{
+    validDate(asOf);
     const [plans,recurring,cards,snapshots,txs]=await Promise.all([
-      this.repo.listDebtPlans(),this.repo.listRecurring(),this.repo.listCards(),this.repo.listCardSnapshots(),this.repo.listTransactions()
+      this.repo.listDebtPlans(),this.repo.listRecurring(),this.repo.listCards(true),this.repo.listCardSnapshots(),this.repo.listTransactions()
     ]);
-    const liveBalance=(snap:typeof snapshots[number])=>{
-      const delta=txs.filter(t=>t.cardId===snap.cardId && t.date>snap.statementDate).reduce((sum,t)=>sum+((t.kind==='payment'||t.kind==='refund')?-t.amount:t.amount),0);
-      return Math.max(0,snap.totalBalance+delta);
+    if(snapshots.some(s=>s.statementDate>asOf))throw new Error('Historical balance unavailable before the latest statement; use a later asOf date');
+    if(monthlyIncome===undefined){
+      const rules=(await this.repo.listIncomeRules()).filter(r=>r.frequency==='monthly'||r.frequency==='semimonthly');
+      const month=asOf.slice(0,7);
+      monthlyIncome=projectIncomeRules(rules,month+'-01',dateAtMonth(month,31)).reduce((sum,e)=>sum+e.amount,0);
+    }
+    finiteNumber(monthlyIncome,'monthlyIncome');
+    const balance=(id:string)=>{
+      const snap=snapshots.find(s=>s.cardId===id);
+      const delta=txs.filter(t=>t.cardId===id&&t.date<=asOf&&(!snap||t.date>snap.statementDate)).reduce((sum,t)=>sum+((t.kind==='payment'||t.kind==='refund')?-t.amount:t.amount),0);
+      return Math.max(0,(snap?.totalBalance||0)+delta);
     };
-    // Archived/closed cards keep their outstanding debt in the balance sheet until it reaches zero.
-    const totalDebt=snapshots.reduce((s,p)=>s+liveBalance(p),0);
+    const cardIds=new Set([...cards.map(c=>c.id),...snapshots.map(s=>s.cardId)]);
+    const totalDebt=[...cardIds].reduce((sum,id)=>sum+balance(id),0);
+    const activeCards=cards.filter(c=>c.status!=='archived');
+    const activeDebt=activeCards.reduce((sum,c)=>sum+balance(c.id),0);
     const interestDebt=plans.filter(p=>p.apr>0).reduce((s,p)=>s+p.principal,0);
     const fixed=recurring.reduce((s,r)=>s+monthlyEquivalent(r),0);
-    const limits=cards.reduce((s,c)=>s+c.creditLimit,0);
-    const nextPayments=snapshots.reduce((s,x)=>s+(x.paymentToAvoidInterest||0),0);
-    return {asOf,monthlyIncome:round2(monthlyIncome),monthlyFixedNet:round2(fixed),totalDebt:round2(totalDebt),interestBearingDebt:round2(interestDebt),monthlyFreeBeforeVariableAndInstallments:round2(monthlyIncome-fixed),totalCreditLimit:round2(limits),creditUtilization:limits?pct(totalDebt/limits):0,nextStatementPayments:round2(nextPayments),dataQualityWarnings:snapshots.filter(s=>s.dataQuality==='estimated'||s.dataQuality==='inconsistent').length};
+    const limits=activeCards.reduce((s,c)=>s+c.creditLimit,0);
+    const nextPayments=snapshots.reduce((sum,snap)=>{
+      const credits=txs.filter(t=>t.cardId===snap.cardId&&t.date>snap.statementDate&&t.date<=asOf&&(t.kind==='payment'||t.kind==='refund')).reduce((n,t)=>n+t.amount,0);
+      return sum+Math.max(0,(snap.paymentToAvoidInterest||0)-credits);
+    },0);
+    return {asOf,monthlyIncome:round2(monthlyIncome),monthlyFixedNet:round2(fixed),totalDebt:round2(totalDebt),interestBearingDebt:round2(interestDebt),monthlyFreeBeforeVariableAndInstallments:round2(monthlyIncome-fixed),totalCreditLimit:round2(limits),creditUtilization:limits?pct(activeDebt/limits):0,nextStatementPayments:round2(nextPayments),dataQualityWarnings:snapshots.filter(s=>s.dataQuality==='estimated'||s.dataQuality==='inconsistent').length};
+  }
+
+  async legacyTrackerReport():Promise<LegacyTrackerReport>{
+    const [txs,incomeRules,recurring,prefs]=await Promise.all([this.repo.listTransactions(),this.repo.listIncomeRules(),this.repo.listRecurring(),this.repo.getPreferences()]);
+    const imported=new Map(txs.filter(t=>t.source==='legacy_tracker'&&t.sourceImportId).map(t=>[t.sourceImportId!,t]));
+    const items=legacyTrackerItems.map(item=>({...item,imported:imported.has(item.id),importedTransactionId:imported.get(item.id)?.id}));
+    const candidateVariableSpend=legacyTrackerItems.filter(i=>i.disposition==='candidate'&&i.financing!=='msi').reduce((s,i)=>s+(i.amount||0),0);
+    const newInstallmentPrincipal=legacyTrackerItems.filter(i=>i.disposition==='candidate'&&i.financing==='msi').reduce((s,i)=>s+(i.transactionAmount||i.totalAmount||0),0);
+    const current=legacyTrackerMonthlyTotals['2026-10']||0,jan=legacyTrackerMonthlyTotals['2027-01']||0;
+    const incomeEvents=projectIncomeRules(incomeRules,'2026-10-01','2026-10-31');
+    const directIncome=incomeEvents.reduce((sum,e)=>sum+e.amount,0);
+    const supportIncome=recurring.filter(r=>r.startDate<='2026-10-31'&&(r.offsetIncome||0)>0).reduce((sum,r)=>sum+(r.offsetIncome||0),0);
+    const knownOctoberInflows=round2(directIncome+supportIncome);
+    const variableOverTarget=round2(candidateVariableSpend-(prefs.variableSpendTarget||0));
+    return {
+      meta:legacyTrackerMeta,
+      monthlyTotals:legacyTrackerMonthlyTotals,
+      sourceTotals:legacyTrackerSourceTotals,
+      currentCycleTotal:round2(current),
+      projectedJanuaryTotal:round2(jan),
+      declineToJanuaryPct:current?round2((1-jan/current)*100):0,
+      candidateVariableSpend:round2(candidateVariableSpend),
+      candidateCount:legacyTrackerItems.filter(i=>i.disposition==='candidate').length,
+      newInstallmentPrincipal:round2(newInstallmentPrincipal),
+      knownOctoberInflows,
+      octoberResidualAfterKnownInflows:round2(knownOctoberInflows-current),
+      variableSpendTarget:round2(prefs.variableSpendTarget||0),
+      variableOverTarget,
+      variableOverTargetPct:prefs.variableSpendTarget?round2(variableOverTarget/prefs.variableSpendTarget*100):0,
+      bbvaSharePct:current?round2((legacyTrackerSourceTotals['2026-10']?.BBVA||0)/current*100):0,
+      items
+    };
+  }
+
+  async importLegacyTrackerItem(id:string,date?:string){
+    const item=legacyTrackerItems.find(x=>x.id===id);if(!item)throw new Error('Legacy tracker item not found');
+    if(item.disposition!=='candidate'||!item.cardId)throw new Error('This tracker item is reference-only and cannot be imported automatically');
+    const txs=await this.repo.listTransactions();const existing=txs.find(t=>t.source==='legacy_tracker'&&t.sourceImportId===id);if(existing)return {transaction:existing,duplicate:true};
+    const effectiveDate=date||item.suggestedDate;if(!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate))throw new Error('date must be YYYY-MM-DD');
+    const created=await this.createTransaction({cardId:item.cardId,date:effectiveDate,description:item.description,amount:item.transactionAmount||item.amount,kind:item.transactionKind||'purchase',financing:item.financing||'regular',category:item.category,installments:item.installments,source:'legacy_tracker',sourceImportId:item.id});
+    return {...created,duplicate:false,legacyItem:item};
   }
 
   async paymentMonthSpend(month:string):Promise<number>{
+    validMonth(month);
     const [txs,cards]=await Promise.all([this.repo.listTransactions(),this.repo.listCards(true)]);
     const cardMap=new Map(cards.map(c=>[c.id,c]));let total=0;
     for(const tx of txs){
@@ -114,14 +179,15 @@ export class FinanceService {
   async setRecurringOverride(recurringId:string,periodKey:string,amount:number,note?:string){
     const recurring=(await this.repo.listRecurring(true)).find(r=>r.id===recurringId);if(!recurring)throw new Error(`Unknown recurring rule: ${recurringId}`);
     if(!/^\d{4}-\d{2}(?:-\d{2})?$/.test(periodKey))throw new Error('periodKey must be YYYY-MM or YYYY-MM-DD');
-    if(amount<0)throw new Error('amount must be >= 0');
+    finiteNumber(amount,'amount');
+    if(periodKey.length===7)validMonth(periodKey);else validDate(periodKey);
     const all=await this.repo.listRecurringOverrides();const previous=all.find(o=>o.recurringId===recurringId&&o.periodKey===periodKey);const now=new Date().toISOString();
     const override:RecurringOverride={id:previous?.id||crypto.randomUUID(),recurringId,periodKey,amount:round2(amount),note,createdAt:previous?.createdAt||now,updatedAt:now};
     await this.repo.saveRecurringOverride(override);return override;
   }
 
   async recurringForMonth(month:string):Promise<RecurringMonthRow[]>{
-    if(!/^\d{4}-\d{2}$/.test(month))throw new Error('month must be YYYY-MM');
+    validMonth(month);
     const [rules,overrides]=await Promise.all([this.repo.listRecurring(),this.repo.listRecurringOverrides()]);
     return rules.map(recurring=>{
       const override=overrides.find(o=>o.recurringId===recurring.id&&(o.periodKey===month||o.periodKey.startsWith(month+'-')));
@@ -136,6 +202,7 @@ export class FinanceService {
   async listImports(){return this.repo.listImports();}
   async getImport(id:string){const x=await this.repo.getImport(id);if(!x)throw new Error(`Unknown import: ${id}`);return x;}
   async resolveImportRow(importId:string,rowId:string,action:'new'|'ignore'|'match',transactionId?:string){
+    if(!['new','ignore','match'].includes(action))throw new Error('Invalid import action');
     const imp=await this.getImport(importId);if(imp.status!=='review')throw new Error('Import is already committed');
     const row=imp.rows.find(r=>r.id===rowId);if(!row)throw new Error('Unknown import row');
     if(action==='ignore'){row.status='ignored';row.matchedTransactionId=undefined;}
@@ -151,9 +218,15 @@ export class FinanceService {
   async commitImport(importId:string){
     const imp=await this.getImport(importId);if(imp.status!=='review')throw new Error('Import is already committed');
     const unresolved=imp.rows.filter(r=>r.status==='possible_match');if(unresolved.length)throw new Error(`${unresolved.length} possible matches require review before commit`);
+    const transactions:TransactionRecord[]=[];
+    let snapshot:CardSnapshot|undefined;
+    const existing=(await this.repo.listTransactions()).filter(t=>t.cardId===imp.cardId);
+    const candidates=reconcileRows(structuredClone(imp.rows.filter(r=>r.status==='new')),existing.filter(t=>!imp.reviewedTransactionIds?.includes(t.id)));
+    if(candidates.some(r=>r.status!=='new'))throw new Error('Transactions changed since review; re-import and reconcile before commit');
     for(const row of imp.rows){
       if(row.status!=='new')continue;
-      await this.createTransaction({cardId:imp.cardId,date:row.transactionDate,description:row.description,amount:row.amount,kind:row.kindGuess,financing:row.financingGuess,source:'statement_import',sourceImportId:imp.id});
+      const prepared=await this.prepareTransaction({cardId:imp.cardId,date:row.transactionDate,description:row.description,amount:row.amount,kind:row.kindGuess,financing:row.financingGuess,installments:row.installments,source:'statement_import',sourceImportId:imp.id});
+      transactions.push(prepared.transaction);
       row.status='committed';
     }
     if(imp.summary.statementDate && (imp.summary.totalBalance!==undefined || (imp.summary.regularBalance!==undefined && imp.summary.installmentBalance!==undefined))){
@@ -162,9 +235,11 @@ export class FinanceService {
       const useComponents=imp.summary.dataQuality==='inconsistent' && componentTotal>0 && (reported===undefined || Math.abs(componentTotal-reported)>1);
       const operationalTotal=useComponents?componentTotal:(reported??componentTotal);
       const qualityNote=useComponents?`Saldo total publicado: ${reported?.toFixed(2)??'no detectado'}; saldo operativo derivado de componentes: ${componentTotal.toFixed(2)}.`:'';
-      await this.repo.upsertCardSnapshot({cardId:imp.cardId,statementDate:imp.summary.statementDate,totalBalance:round2(operationalTotal),regularBalance:imp.summary.regularBalance,installmentBalance:imp.summary.installmentBalance,paymentToAvoidInterest:imp.summary.paymentToAvoidInterest,availableCredit:imp.summary.availableCredit,dataQuality:imp.summary.dataQuality,note:[qualityNote,...imp.extractionWarnings].filter(Boolean).join(' ')||undefined});
+      snapshot={cardId:imp.cardId,statementDate:imp.summary.statementDate,totalBalance:round2(operationalTotal),regularBalance:imp.summary.regularBalance,installmentBalance:imp.summary.installmentBalance,paymentToAvoidInterest:imp.summary.paymentToAvoidInterest,availableCredit:imp.summary.availableCredit,dataQuality:imp.summary.dataQuality,note:[qualityNote,...imp.extractionWarnings].filter(Boolean).join(' ')||undefined};
+      const current=await this.repo.getCardSnapshot(imp.cardId);
+      if(current&&snapshot.statementDate<current.statementDate)snapshot=undefined;
     }
-    imp.status='committed';imp.committedAt=new Date().toISOString();await this.repo.updateImport(imp);return imp;
+    imp.status='committed';imp.committedAt=new Date().toISOString();await this.repo.commitStatementImport(imp,transactions,snapshot);return imp;
   }
 
   async getPreferences(){return this.repo.getPreferences();}
@@ -172,6 +247,7 @@ export class FinanceService {
   async updatePreferences(patch:Partial<FinancialPreferences>){
     const current=await this.repo.getPreferences();
     const next:FinancialPreferences={...current,...patch,updatedAt:new Date().toISOString()};
+    validatePreferences(next);
     if(next.openingCash<0)throw new Error('openingCash must be >= 0');
     if(next.variableSpendTarget<0)throw new Error('variableSpendTarget must be >= 0');
     if(next.emergencyFundMonths<0||next.emergencyFundMonths>24)throw new Error('emergencyFundMonths must be 0..24');
@@ -183,7 +259,8 @@ export class FinanceService {
   private async buildForecastEnvelope(options:ForecastOptions,scenario?:ScenarioRequest):Promise<ForecastEnvelope>{
     const stored=await this.repo.getPreferences();
     const prefs:FinancialPreferences={...stored,openingCash:options.openingCash??stored.openingCash,variableSpendTarget:options.variableSpendTarget??stored.variableSpendTarget,forecastHorizonMonths:options.horizonMonths??stored.forecastHorizonMonths};
-    const asOf=options.asOf; if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf))throw new Error('asOf must be YYYY-MM-DD');
+    validatePreferences(prefs);
+    const asOf=options.asOf;validDate(asOf,'asOf');
     const until=horizonEnd(asOf,prefs.forecastHorizonMonths);
     const [cards,snapshots,txs,rules,overrides,incomeRules,commitments,plans]=await Promise.all([
       this.repo.listCards(true),this.repo.listCardSnapshots(),this.repo.listTransactions(),this.repo.listRecurring(),this.repo.listRecurringOverrides(),this.repo.listIncomeRules(),this.repo.listInstallmentCommitments(),this.repo.listDebtPlans()
@@ -193,7 +270,7 @@ export class FinanceService {
     events.push(...projectIncomeRules(incomeRules,asOf,until));
 
     // Current reconciled statements: one cash payment, never re-count the underlying purchases.
-    for(const snap of snapshots){const card=cardMap.get(snap.cardId);if(!card||!snap.paymentToAvoidInterest)continue;const close=new Date(snap.statementDate+'T00:00:00Z');const p=projectTransaction({id:'snapshot',cardId:card.id,date:snap.statementDate,description:'snapshot',amount:snap.paymentToAvoidInterest,kind:'purchase',financing:'regular'},card) as PurchaseProjection;const date=p.payDate;if(date>=asOf&&date<=until)events.push({date,label:`Estado ${card.name}`,amount:snap.paymentToAvoidInterest,type:'expense',itemType:'card_payment',cardId:card.id,sourceId:`snapshot:${card.id}`,metadata:{statementDate:snap.statementDate,dataQuality:snap.dataQuality}});}
+    for(const snap of snapshots){const card=cardMap.get(snap.cardId);if(!card||!snap.paymentToAvoidInterest)continue;const close=new Date(snap.statementDate+'T00:00:00Z');const p=projectTransaction({id:'snapshot',cardId:card.id,date:snap.statementDate,description:'snapshot',amount:snap.paymentToAvoidInterest,kind:'purchase',financing:'regular'},card) as PurchaseProjection;const date=p.payDate<asOf?asOf:p.payDate;if(date<=until)events.push({date,label:`Estado ${card.name}`,amount:snap.paymentToAvoidInterest,type:'expense',itemType:'card_payment',cardId:card.id,sourceId:`snapshot:${card.id}`,metadata:{statementDate:snap.statementDate,dataQuality:snap.dataQuality}});}
 
     // Recurring obligations. Known card domiciles are shifted to their expected card payment date.
     for(const rule of rules){
@@ -207,13 +284,21 @@ export class FinanceService {
         }else events.push({date:o.date,label:rule.name,amount,type:'expense',itemType:'fixed_expense',sourceId:`recurring:${rule.id}`,assumption:true,metadata:{override:o.override}});
       }
     }
+    assumptions.push('Los intereses usan periodos estimados de 30 días; tasas y saldos de planes deben actualizarse con el estado de cuenta.');
     assumptions.push('Los recurrentes con tarjeta conocida se proyectan a la fecha esperada de pago; los demás se muestran en su fecha de ocurrencia configurada.');
 
-    // New/unreconciled transactions after each card's latest official snapshot.
+    // Unreconciled card charges. Refunds/payments are applied once below as liability credits.
     for(const tx of txs){
-      if(tx.kind==='payment')continue;const card=cardMap.get(tx.cardId);if(!card)continue;const snap=snapshotMap.get(tx.cardId);if(snap&&tx.date<=snap.statementDate)continue;const p=projectTransaction(tx,card) as PurchaseProjection;const sign=tx.kind==='refund'?-1:1;
-      if(tx.financing==='msi'&&p.installments){const firstDay=Number(p.payDate.slice(8,10));for(const i of p.installments){const date=dateAtMonth(i.dueMonth,firstDay);if(date>=asOf&&date<=until){if(sign>0)events.push({date,label:`${card.name} · ${tx.description} (${i.number}/${p.installments.length})`,amount:i.amount,type:'expense',itemType:'installment',cardId:card.id,sourceId:tx.id});else events.push({date,label:`Reembolso ${card.name} · ${tx.description}`,amount:i.amount,type:'income',itemType:'transfer',cardId:card.id,sourceId:tx.id});}}}
-      else if(p.payDate>=asOf&&p.payDate<=until){const e={date:p.payDate,label:`${card.name} · ${tx.description}`,amount:tx.amount,type:sign>0?'expense':'income',itemType:'card_payment',cardId:card.id,sourceId:tx.id};events.push(e);}
+      if(tx.kind==='payment'||tx.kind==='refund')continue;
+      const card=cardMap.get(tx.cardId);if(!card)continue;
+      const snap=snapshotMap.get(tx.cardId);if(snap&&tx.date<=snap.statementDate)continue;
+      const p=projectTransaction(tx,card) as PurchaseProjection;
+      if(tx.financing==='msi'&&p.installments){
+        const day=Number(p.payDate.slice(8,10));
+        for(const installment of p.installments){const date=dateAtMonth(installment.dueMonth,day);
+          if(date>=asOf&&date<=until)events.push({date,label:`${card.name} · ${tx.description} (${installment.number}/${p.installments.length})`,amount:installment.amount,type:'expense',itemType:'installment',cardId:card.id,sourceId:tx.id});
+        }
+      }else if(p.payDate>=asOf&&p.payDate<=until)events.push({date:p.payDate,label:`${card.name} · ${tx.description}`,amount:tx.amount,type:'expense',itemType:'card_payment',cardId:card.id,sourceId:tx.id});
     }
 
     // Existing zero-interest installments already documented in statements.
@@ -226,7 +311,7 @@ export class FinanceService {
       let extraAmount=extra?.amount||0;if(extraAmount<0)extraAmount=0;
       if(extra&&plan.nextPaymentDate&&extra.date>plan.nextPaymentDate)warnings.push(`El abono a ${plan.name} ocurre después de su próximo pago; esta versión aproxima el abono como reducción de principal antes del calendario restante.`);
       if(extra&&extra.date>=asOf&&extra.date<=until)events.push({date:extra.date,label:`Abono extraordinario · ${plan.name}`,amount:extraAmount,type:'expense',itemType:'extra_debt_payment',cardId:plan.cardId,sourceId:plan.id});
-      const schedule=amortize(plan,extraAmount);if(extra){const cmp=compareExtraPayment(plan,extraAmount);interestAndTaxSaved+=cmp.interestAndTaxSaved;paymentsSaved+=cmp.paymentsSaved;}
+      const schedule=amortize(plan,extraAmount);if(schedule.endingBalance>0.005)warnings.push(`${plan.name}: queda saldo de ${round2(schedule.endingBalance)} al terminar los pagos configurados; el calendario no liquida toda la deuda.`);if(extra){const cmp=compareExtraPayment(plan,extraAmount);interestAndTaxSaved+=cmp.interestAndTaxSaved;paymentsSaved+=cmp.paymentsSaved;}
       const start=plan.nextPaymentDate||asOf;const dates=monthlyDates(start,schedule.rows.length);schedule.rows.forEach((row,i)=>{const date=dates[i];if(date>=asOf&&date<=until)events.push({date,label:`${cardMap.get(plan.cardId)?.name||plan.cardId} · ${plan.name}`,amount:round2(row.payment),type:'expense',itemType:'interest_debt',cardId:plan.cardId,sourceId:plan.id,metadata:{principal:round2(row.principalPaid),interest:round2(row.interest),tax:round2(row.tax),closing:round2(row.closing)}})});
     }
 
@@ -239,7 +324,18 @@ export class FinanceService {
 
     if(prefs.openingCash===0)warnings.push('Saldo líquido inicial = 0. Configura tu saldo real para obtener mínimos diarios útiles.');
     if(cards.some(c=>c.id==='liverpool'))warnings.push('Liverpool: fecha de corte 27 y pago el día 27 del mes siguiente. El desglose futuro de planes no se proyecta aún porque el PDF compartido no expone texto fiable a nivel de cada plan.');
-    const forecast=buildForecast(asOf,until,events,prefs,warnings);
+    // Apply already recorded payments/refunds to known card obligations, oldest first.
+    // Opening cash is as-of cash: paying a card must not consume it a second time.
+    for(const card of cards){
+      const snap=snapshotMap.get(card.id);
+      let credits=txs.filter(t=>t.cardId===card.id&&t.date<=asOf&&(!snap||t.date>snap.statementDate)&&(t.kind==='payment'||t.kind==='refund')).reduce((sum,t)=>sum+t.amount,0);
+      const known=events.filter(e=>e.cardId===card.id&&e.type==='expense'&&!e.assumption&&e.itemType!=='extra_debt_payment').sort((a,b)=>a.date.localeCompare(b.date));
+      for(const e of known){const applied=Math.min(e.amount,credits);e.amount=round2(e.amount-applied);credits=round2(credits-applied);}
+      if(credits>0)warnings.push(`${card.name}: existe crédito a favor sin asignar; no se trata como ingreso en efectivo.`);
+      const overdue=known.find(e=>e.sourceId===`snapshot:${card.id}`&&e.amount>0);
+      if(overdue&&snap){const due=projectTransaction({id:'due',cardId:card.id,date:snap.statementDate,description:'Estado',amount:1,kind:'purchase',financing:'regular'},card).payDate;if(due<asOf)warnings.push(`${card.name}: el estado vencido se proyecta hoy hasta registrar o conciliar su pago.`);}
+    }
+    const forecast=buildForecast(asOf,until,events.filter(e=>e.amount>0),prefs,warnings);
 
     // Known debt/commitment balance trajectory, deliberately separate from total card balance.
     const months=forecast.monthly.map(m=>m.month);const debtTimeline:DebtTimelineRow[]=[];
@@ -256,9 +352,21 @@ export class FinanceService {
   async forecast(options:ForecastOptions){return this.buildForecastEnvelope(options);}
 
   async simulateScenario(request:ScenarioRequest):Promise<ScenarioComparison>{
+    validDate(request.asOf,'asOf');
+    const end=horizonEnd(request.asOf,request.horizonMonths??(await this.repo.getPreferences()).forecastHorizonMonths);
+    for(const entry of [request.purchase,request.extraDebtPayment,request.oneTimeIncome]){
+      if(entry){validDate(entry.date);finiteNumber(entry.amount,'scenario amount',0.01);if(entry.date<request.asOf||entry.date>end)throw new Error('Scenario date must be inside forecast horizon');}
+    }
+    if(request.purchase)validateTransaction({...request.purchase,description:request.purchase.description||'Simulación'});
+    if(request.extraDebtPayment){
+      const extra=request.extraDebtPayment,plan=await this.repo.getDebtPlan(extra.planId);
+      if(!plan)throw new Error('Unknown debt plan');
+      finiteNumber(extra.amount,'extra payment',0.01,plan.principal);
+      if(plan.nextPaymentDate&&extra.date>plan.nextPaymentDate)throw new Error('Extra payment after the next scheduled payment requires an updated debt plan');
+    }
     const baseline=await this.buildForecastEnvelope(request);const scenario=await this.buildForecastEnvelope(request,request);const stats=(scenario.forecast as any)._scenarioStats||{interestAndTaxSaved:0,paymentsSaved:0};delete (baseline.forecast as any)._scenarioStats;delete (scenario.forecast as any)._scenarioStats;
     const deltas={endingCash:round2(scenario.forecast.metrics.endingCash-baseline.forecast.metrics.endingCash),minimumCash:round2(scenario.forecast.metrics.minimumCash-baseline.forecast.metrics.minimumCash),negativeDays:scenario.forecast.metrics.negativeDays-baseline.forecast.metrics.negativeDays,totalOutflow:round2(scenario.forecast.metrics.totalOutflow-baseline.forecast.metrics.totalOutflow),interestAndTaxSaved:stats.interestAndTaxSaved,paymentsSaved:stats.paymentsSaved};
-    const alerts:string[]=[];if(scenario.forecast.metrics.minimumCash<0)alerts.push(`El escenario cruza saldo negativo el ${scenario.forecast.metrics.firstNegativeDate}.`);if(request.purchase?.financing==='msi'&&request.purchase.installments){const monthly=request.purchase.amount/request.purchase.installments;const ratio=monthly/34000;const pref=await this.repo.getPreferences();if(ratio>pref.maxMsiIncomeRatio)alerts.push(`La nueva mensualidad representa ${(ratio*100).toFixed(1)}% del sueldo mensual, por encima del umbral configurado de ${(pref.maxMsiIncomeRatio*100).toFixed(0)}%.`);}return {baseline,scenario,deltas,alerts};
+    const alerts:string[]=[];if(scenario.forecast.metrics.minimumCash<0)alerts.push(`El escenario cruza saldo negativo el ${scenario.forecast.metrics.firstNegativeDate}.`);if(request.purchase?.financing==='msi'&&request.purchase.installments){const monthly=request.purchase.amount/request.purchase.installments;const income=(await this.overview(request.asOf)).monthlyIncome;const ratio=income>0?monthly/income:Infinity;const pref=await this.repo.getPreferences();if(ratio>pref.maxMsiIncomeRatio)alerts.push(`La nueva mensualidad representa ${(ratio*100).toFixed(1)}% del sueldo mensual, por encima del umbral configurado de ${(pref.maxMsiIncomeRatio*100).toFixed(0)}%.`);}return {baseline,scenario,deltas,alerts};
   }
 
   async listAccounts(includeArchived=false){ return this.repo.listAccounts(includeArchived); }
@@ -287,9 +395,9 @@ export class FinanceService {
   async listGoals(includeArchived=false){return this.repo.listGoals(includeArchived);}
   async createGoal(input:CreateGoalInput):Promise<SavingsGoal>{
     if(!input.name?.trim())throw new Error('goal name is required');
-    if(!(input.targetAmount>0))throw new Error('targetAmount must be > 0');
+    finiteNumber(input.targetAmount,'targetAmount',0.01);finiteNumber(input.currentAmount??0,'currentAmount');
     const current=round2(input.currentAmount||0);if(current<0)throw new Error('currentAmount must be >= 0');
-    if(input.targetDate&&!/^\d{4}-\d{2}-\d{2}$/.test(input.targetDate))throw new Error('targetDate must be YYYY-MM-DD');
+    if(input.targetDate)validDate(input.targetDate,'targetDate');
     const now=new Date().toISOString();
     const goal:SavingsGoal={id:crypto.randomUUID(),name:input.name.trim(),type:input.type||'other',targetAmount:round2(input.targetAmount),currentAmount:current,targetDate:input.targetDate,priority:input.priority||'medium',status:current>=input.targetAmount?'completed':'active',note:input.note?.trim()||undefined,createdAt:now,updatedAt:now};
     await this.repo.saveGoal(goal);return goal;
@@ -298,9 +406,9 @@ export class FinanceService {
     const current=await this.repo.getGoal(id);if(!current)throw new Error(`Unknown goal: ${id}`);
     const updated:SavingsGoal={...current,...patch,id,updatedAt:new Date().toISOString()} as SavingsGoal;
     if(!updated.name?.trim())throw new Error('goal name is required');
-    if(!(updated.targetAmount>0))throw new Error('targetAmount must be > 0');
+    finiteNumber(updated.targetAmount,'targetAmount',0.01);finiteNumber(updated.currentAmount,'currentAmount');
     if(updated.currentAmount<0)throw new Error('currentAmount must be >= 0');
-    if(updated.targetDate&&!/^\d{4}-\d{2}-\d{2}$/.test(updated.targetDate))throw new Error('targetDate must be YYYY-MM-DD');
+    if(updated.targetDate)validDate(updated.targetDate,'targetDate');
     updated.name=updated.name.trim();updated.note=updated.note?.trim()||undefined;updated.targetAmount=round2(updated.targetAmount);updated.currentAmount=round2(updated.currentAmount);
     if(updated.status!=='archived')updated.status=updated.currentAmount>=updated.targetAmount?'completed':'active';
     if(patch.status==='archived'&&!current.archivedAt)updated.archivedAt=new Date().toISOString();
@@ -309,11 +417,11 @@ export class FinanceService {
   }
   async archiveGoal(id:string){return this.updateGoal(id,{status:'archived'});}
   async contributeToGoal(id:string,amount:number,date?:string,note?:string){
-    if(!(amount>0))throw new Error('contribution amount must be > 0');
+    finiteNumber(amount,'contribution amount',0.01);
     const goal=await this.repo.getGoal(id);if(!goal)throw new Error(`Unknown goal: ${id}`);if(goal.status==='archived')throw new Error('Cannot contribute to an archived goal');
-    const when=date||new Date().toISOString().slice(0,10);if(!/^\d{4}-\d{2}-\d{2}$/.test(when))throw new Error('date must be YYYY-MM-DD');
+    const when=date||new Date().toISOString().slice(0,10);validDate(when);
     const contribution:GoalContribution={id:crypto.randomUUID(),goalId:id,amount:round2(amount),date:when,note:note?.trim()||undefined,createdAt:new Date().toISOString()};
-    await this.repo.saveGoalContribution(contribution);await this.updateGoal(id,{currentAmount:round2(goal.currentAmount+amount)} as any);return {contribution,goal:await this.repo.getGoal(id)};
+    await this.repo.contributeToGoal(contribution);return {contribution,goal:await this.repo.getGoal(id)};
   }
   async listGoalContributions(goalId?:string){return this.repo.listGoalContributions(goalId);}
 
@@ -334,7 +442,7 @@ export class FinanceService {
   }
 
   async planningSummary(asOf:string):Promise<PlanningSummary>{
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf))throw new Error('asOf must be YYYY-MM-DD');
+    validDate(asOf,'asOf');
     const [accounts,goals,prefs,overview,cards,snapshots,txs]=await Promise.all([this.repo.listAccounts(),this.repo.listGoals(),this.repo.getPreferences(),this.overview(asOf),this.repo.listCards(),this.repo.listCardSnapshots(),this.repo.listTransactions()]);
     const totalAssets=round2(accounts.filter(a=>a.includeInNetWorth).reduce((s,a)=>s+a.balance,0));
     const liquidAssets=round2(accounts.filter(a=>a.type==='checking'||a.type==='savings'||a.type==='cash').reduce((s,a)=>s+a.balance,0));
@@ -344,7 +452,7 @@ export class FinanceService {
     if(!accounts.length)alerts.push({id:'accounts-missing',severity:'info',title:'Completa tus activos',message:'Agrega cuentas bancarias, efectivo o ahorro para calcular un patrimonio neto completo.',route:'accounts'});
     if(overview.interestBearingDebt>0)alerts.push({id:'interest-debt',severity:'warning',title:'Deuda con interés activa',message:`Hay ${round2(overview.interestBearingDebt).toLocaleString('es-MX',{style:'currency',currency:'MXN'})} de principal en planes que generan intereses.`,route:'debt',amount:overview.interestBearingDebt});
     const cardMap=new Map(cards.map(c=>[c.id,c]));
-    const risks=snapshots.map(s=>{const c=cardMap.get(s.cardId);if(!c)return null;const delta=txs.filter(t=>t.cardId===s.cardId&&t.date>s.statementDate).reduce((sum,t)=>sum+((t.kind==='payment'||t.kind==='refund')?-t.amount:t.amount),0);const bal=Math.max(0,s.totalBalance+delta);return {c,bal,u:c.creditLimit?bal/c.creditLimit:0};}).filter(Boolean) as Array<{c:Card;bal:number;u:number}>;
+    const risks=cards.map(c=>{const snap=snapshots.find(s=>s.cardId===c.id);const delta=txs.filter(t=>t.cardId===c.id&&t.date<=asOf&&(!snap||t.date>snap.statementDate)).reduce((sum,t)=>sum+((t.kind==='payment'||t.kind==='refund')?-t.amount:t.amount),0);const bal=Math.max(0,(snap?.totalBalance||0)+delta);return {c,bal,u:c.creditLimit?bal/c.creditLimit:0};});
     for(const r of risks.filter(r=>r.u>prefs.maxCreditUtilization).sort((a,b)=>b.u-a.u).slice(0,3))alerts.push({id:`util-${r.c.id}`,severity:r.u>=.8?'critical':'warning',title:`Utilización alta · ${r.c.name}`,message:`La tarjeta está en ${(r.u*100).toFixed(1)}% de utilización; tu umbral configurado es ${(prefs.maxCreditUtilization*100).toFixed(0)}%.`,route:'cards',amount:r.bal});
     if(target>0&&emergencyCurrent<target)alerts.push({id:'emergency-gap',severity:emergencyCurrent<overview.monthlyFixedNet?'warning':'info',title:'Fondo de emergencia incompleto',message:`Faltan ${round2(target-emergencyCurrent).toLocaleString('es-MX',{style:'currency',currency:'MXN'})} para la meta de ${prefs.emergencyFundMonths} meses.`,route:'goals',amount:round2(target-emergencyCurrent)});
     const now=new Date(asOf+'T00:00:00Z');for(const p of goalItems){if(!p.goal.targetDate||p.gap<=0)continue;const days=Math.ceil((new Date(p.goal.targetDate+'T00:00:00Z').getTime()-now.getTime())/86400000);if(days<=90)alerts.push({id:`goal-${p.goal.id}`,severity:days<30?'warning':'info',title:`Meta próxima · ${p.goal.name}`,message:`Faltan ${p.gap.toLocaleString('es-MX',{style:'currency',currency:'MXN'})}${p.requiredMonthly?` (${p.requiredMonthly.toLocaleString('es-MX',{style:'currency',currency:'MXN'})}/mes aprox.)`:''}.`,route:'goals',amount:p.gap,date:p.goal.targetDate});}
@@ -363,15 +471,16 @@ export class FinanceService {
     return {cards,snapshots,recurring,recurringOverrides,transactions};
   }
 
-  async cardDashboard(cardId:string):Promise<CardDashboard>{
+  async cardDashboard(cardId:string,asOf=new Date().toISOString().slice(0,10)):Promise<CardDashboard>{
+    validDate(asOf);
     const [card,snapshot,txs]=await Promise.all([this.repo.getCard(cardId),this.repo.getCardSnapshot(cardId),this.repo.listTransactions()]);
     if(!card) throw new Error(`Unknown card: ${cardId}`);
     const cardTx=txs.filter(t=>t.cardId===cardId).sort((a,b)=>b.date.localeCompare(a.date));
-    const today=new Date().toISOString().slice(0,10);const currentClose=statementCloseFor(today,card).toISOString().slice(0,10);
-    const cycleTx=cardTx.filter(t=>t.kind!=='payment' && projectTransaction(t,card).close===currentClose);
+    const currentClose=statementCloseFor(asOf,card).toISOString().slice(0,10);
+    const cycleTx=cardTx.filter(t=>t.date<=asOf&&t.kind!=='payment' && projectTransaction(t,card).close===currentClose);
     const currentCycleSpend=cycleTx.reduce((s,t)=>s+(t.kind==='refund'?-t.amount:t.amount),0);
     const projectedNextPayment=cycleTx.reduce((sum,t)=>{const p=projectTransaction(t,card) as PurchaseProjection;const sign=t.kind==='refund'?-1:1;if(t.financing==='msi'&&p.installments)return sum+sign*(p.installments[0]?.amount||0);return sum+sign*t.amount;},0);
-    const balanceDelta=cardTx.filter(t=>!snapshot||t.date>snapshot.statementDate).reduce((sum,t)=>sum+((t.kind==='payment'||t.kind==='refund')?-t.amount:t.amount),0);
+    const balanceDelta=cardTx.filter(t=>t.date<=asOf&&(!snapshot||t.date>snapshot.statementDate)).reduce((sum,t)=>sum+((t.kind==='payment'||t.kind==='refund')?-t.amount:t.amount),0);
     const currentBalance=round2(Math.max(0,(snapshot?.totalBalance||0)+balanceDelta));
     return {card,snapshot,currentBalance,utilization:round2(currentBalance/card.creditLimit*100),currentCycleSpend:round2(currentCycleSpend),projectedNextPayment:round2(projectedNextPayment),transactions:cardTx,dataQuality:snapshot?.dataQuality||'estimated'};
   }

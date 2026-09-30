@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Personal Finance OS API
-  version: 0.8.0
-  description: API for personal-finance planning, assets, goals, alerts, card lifecycle management, forecasting, reconciliation, and the read-only AI financial copilot.
+  version: 0.8.1
+  description: API for personal-finance planning, assets, goals, alerts, forecasting, reconciliation, legacy-tracker review, and the read-only AI financial copilot.
 servers:
   - url: /api
 paths:
@@ -343,6 +343,30 @@ paths:
       summary: Update theme, dashboard mode and visible widgets
       responses:
         '200': { description: Updated UI preferences }
+  /v1/reports/legacy-tracker:
+    get:
+      summary: Analyze the legacy Finanzas_Personales_v2 tracker as a secondary source
+      responses:
+        '200': { description: Monthly totals, source concentration, import candidates, budget deltas and source-quality metadata }
+  /v1/reports/legacy-tracker/items/{itemId}/import:
+    post:
+      summary: Confirm one eligible legacy-tracker candidate into the live transaction ledger
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date: { type: string, format: date }
+      responses:
+        '201': { description: Imported transaction or duplicate acknowledgement }
   /v1/forecast:
     get:
       summary: Project daily and monthly cash flow plus known debt commitments

@@ -4,6 +4,32 @@ exports.InMemoryFinanceRepository = void 0;
 const seed_1 = require("../../core/src/seed");
 const financial_snapshots_1 = require("./financial-snapshots");
 class InMemoryFinanceRepository {
+    async commitStatementImport(statement, transactions, snapshot) {
+        const index = this.imports.findIndex(i => i.id === statement.id);
+        if (index < 0 || this.imports[index].status !== 'review')
+            throw new Error('Import is already committed');
+        this.transactions.push(...structuredClone(transactions));
+        if (snapshot) {
+            const i = this.snapshots.findIndex(s => s.cardId === snapshot.cardId);
+            if (i < 0)
+                this.snapshots.push(structuredClone(snapshot));
+            else
+                this.snapshots[i] = structuredClone(snapshot);
+        }
+        this.imports[index] = structuredClone(statement);
+    }
+    async contributeToGoal(contribution) {
+        const goal = this.goals.find(g => g.id === contribution.goalId);
+        if (!goal || goal.status === 'archived')
+            throw new Error('Goal unavailable');
+        const amount = Math.round((goal.currentAmount + contribution.amount) * 100) / 100;
+        if (!Number.isSafeInteger(Math.round(amount * 100)))
+            throw new Error('Goal balance is too large');
+        goal.currentAmount = amount;
+        goal.updatedAt = contribution.createdAt;
+        goal.status = amount >= goal.targetAmount ? 'completed' : 'active';
+        this.goalContributions.push(structuredClone(contribution));
+    }
     cards = structuredClone(seed_1.cards).map(c => ({ ...c, status: c.status || 'active' }));
     snapshots = structuredClone(financial_snapshots_1.cardSnapshots);
     recurring = structuredClone(seed_1.recurring);

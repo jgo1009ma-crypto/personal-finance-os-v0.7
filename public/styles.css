@@ -52,3 +52,7 @@ body{overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}.topbar{
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
 :root[data-theme="dark"] .recurring-item.overridden{background:#182543;border-color:#344b76}:root[data-theme="dark"] .copilot-status.openai{background:#103126;color:#78e2b6}:root[data-theme="dark"] .copilot-status.local{background:#332812;color:#f0c371}:root[data-theme="dark"] .chat-avatar{background:#263958}:root[data-theme="dark"] .chat-msg.user .chat-avatar{background:#263958;color:#dce7ff}:root[data-theme="dark"] .bar-track,:root[data-theme="dark"] .progress{background:#1c2b42}:root[data-theme="dark"] .table td{border-color:var(--border)}
 @media(max-width:1024px){.mobile-nav{background:var(--panel)}}
+
+/* v0.8.1 legacy tracker integration */
+.insight-stack{display:grid;gap:12px}.insight-row{display:grid;grid-template-columns:150px 1fr;gap:14px;align-items:start;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--panel2)}.insight-row strong{font-size:18px}.insight-row span{font-size:11px;color:var(--muted);line-height:1.45}.legacy-source{padding:10px 0;border-bottom:1px solid var(--border)}.legacy-source:last-child{border-bottom:0}.legacy-details summary{cursor:pointer;list-style:none}.legacy-details summary::-webkit-details-marker{display:none}.legacy-details[open] summary{border-bottom:1px solid var(--border)}
+@media(max-width:600px){.insight-row{grid-template-columns:1fr}.legacy-details .table{min-width:760px}}

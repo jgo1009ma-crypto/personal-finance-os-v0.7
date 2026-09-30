@@ -1,5 +1,6 @@
 import {FinancialPreferences,IncomeRule} from './types';
-import {endOrDay,makeDate,monthAdd,ym} from './date';
+import {addDays,endOrDay,makeDate,monthAdd,ym} from './date';
+import {validDate,integer,finiteNumber} from './validation';
 
 export type ForecastItemType='income'|'fixed_expense'|'variable_budget'|'card_payment'|'installment'|'interest_debt'|'extra_debt_payment'|'scenario_purchase'|'transfer';
 export interface CashEvent {
@@ -62,6 +63,7 @@ export function cashflow(events:CashEvent[], opening=0){
 }
 
 export function horizonEnd(asOf:string,months:number){
+  validDate(asOf);integer(months,'months',1,36);
   const [y,m]=asOf.slice(0,7).split('-').map(Number);
   const lastMonth=makeDate(y,m+Math.max(1,months)-1,1);
   return iso(endOrDay(lastMonth.getUTCFullYear(),lastMonth.getUTCMonth()+1,31));
@@ -105,9 +107,10 @@ export function projectVariableBudget(monthlyAmount:number,asOf:string,until:str
   const [sy,sm]=asOf.slice(0,7).split('-').map(Number);let cursor=makeDate(sy,sm,1);
   while(ym(cursor)<=until.slice(0,7)){
     const y=cursor.getUTCFullYear(),m=cursor.getUTCMonth()+1;
-    const amount=r2(monthlyAmount/4);
+    const cents=Math.round(monthlyAmount*100),base=Math.floor(cents/4);
     [7,14,21,28].forEach((day,i)=>{
       const date=iso(endOrDay(y,m,day));
+      const amount=(base+(i===3?cents-base*4:0))/100;
       if(date>=asOf&&date<=until)out.push({date,label:`Presupuesto variable ${i+1}/4`,amount,type:'expense',itemType:'variable_budget',assumption:true});
     });
     cursor=monthAdd(cursor,1);
@@ -116,6 +119,9 @@ export function projectVariableBudget(monthlyAmount:number,asOf:string,until:str
 }
 
 export function buildForecast(asOf:string,until:string,events:CashEvent[],preferences:FinancialPreferences,warnings:string[]=[]):ForecastResult{
+  validDate(asOf);validDate(until);finiteNumber(preferences.openingCash,'openingCash',-Number.MAX_SAFE_INTEGER/100);
+  if(until<asOf||Date.parse(until)-Date.parse(asOf)>366*3*86400000)throw new Error('invalid forecast range');
+  for(const event of events){validDate(event.date);finiteNumber(event.amount,'event amount');}
   const filtered=events.filter(e=>e.date>=asOf&&e.date<=until&&e.amount>=0);
   const daily=cashflow(filtered,preferences.openingCash);
   const monthMap=new Map<string,MonthlyForecastRow>();
@@ -143,7 +149,14 @@ export function buildForecast(asOf:string,until:string,events:CashEvent[],prefer
   let running=preferences.openingCash;
   for(const r of monthly){r.income=r2(r.income);r.fixedExpenses=r2(r.fixedExpenses);r.variableBudget=r2(r.variableBudget);r.cardPayments=r2(r.cardPayments);r.installments=r2(r.installments);r.interestDebt=r2(r.interestDebt);r.extraDebtPayments=r2(r.extraDebtPayments);r.scenarioPurchases=r2(r.scenarioPurchases);r.totalOutflow=r2(r.totalOutflow);r.netCashflow=r2(r.income-r.totalOutflow);running=r2(running+r.netCashflow);r.endingBalance=running;}
   let minimumCash=preferences.openingCash,minimumCashDate:string|undefined,negativeDays=0,firstNegativeDate:string|undefined;
-  for(const r of daily){if(r.balance<minimumCash){minimumCash=r.balance;minimumCashDate=r.date}if(r.balance<0){negativeDays++;firstNegativeDate??=r.date}}
+  // Risk metrics use calendar days and closing balances, independent of labels/event order.
+  const closings=new Map<string,number>();for(const row of daily)closings.set(row.date,row.balance);
+  let closing=preferences.openingCash;
+  for(let day=new Date(asOf+'T00:00:00Z');iso(day)<=until;day=addDays(day,1)){
+    const date=iso(day);closing=closings.get(date)??closing;
+    if(closing<minimumCash){minimumCash=closing;minimumCashDate=date;}
+    if(closing<0){negativeDays++;firstNegativeDate??=date;}
+  }
   const metrics:ForecastMetrics={openingCash:r2(preferences.openingCash),endingCash:r2(daily.at(-1)?.balance??preferences.openingCash),minimumCash:r2(minimumCash),minimumCashDate,negativeDays,firstNegativeDate,monthsWithNegativeEndingBalance:monthly.filter(m=>m.endingBalance<0).length,totalIncome:r2(filtered.filter(e=>e.type==='income').reduce((s,e)=>s+e.amount,0)),totalOutflow:r2(filtered.filter(e=>e.type==='expense').reduce((s,e)=>s+e.amount,0))};
   return {asOf,horizonEnd:until,preferences,events:filtered.sort((a,b)=>a.date.localeCompare(b.date)),daily,monthly,metrics,warnings};
 }
